@@ -7,7 +7,17 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import { UploadedFile, Measurement, MeasurementType, ScaleCalibration, Unit } from '@/types';
-import { calculateLength, calculateArea, generateColor } from '@/utils/measurements';
+import { calculateLength, calculateArea } from '@/utils/measurements';
+import { getDefaultColor, getCategoryColor, getToolColor, getAllCategories } from '@/utils/categories';
+import { ChevronLeft, ChevronRight, CheckCircle, FileText, X } from 'lucide-react';
+
+// Convert hex color to RGBA with specified opacity
+const hexToRgba = (hex: string, opacity: number): string => {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+};
 
 // Set up PDF.js worker
 if (typeof window !== 'undefined') {
@@ -25,6 +35,9 @@ interface ViewerProps {
   onCalibrationUpdate: (calibration: ScaleCalibration) => void;
   selectedMeasurementId: string | null;
   onMeasurementSelect: (id: string | null) => void;
+  defaultColor?: string;
+  defaultCategory?: string;
+  defaultType?: MeasurementType | null;
 }
 
 export default function Viewer({
@@ -38,6 +51,9 @@ export default function Viewer({
   onCalibrationUpdate,
   selectedMeasurementId,
   onMeasurementSelect,
+  defaultColor,
+  defaultCategory,
+  defaultType,
 }: ViewerProps) {
   const [scale, setScale] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -166,11 +182,12 @@ export default function Viewer({
       const value = calculateLength(currentPoints, calibration);
       const measurement: Measurement = {
         id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-        name: `Length ${measurements.filter(m => m.type === 'length').length + 1}`,
+        name: `Linear ${measurements.filter(m => m.type === 'length').length + 1}`,
         type: 'length',
         value,
         units: calibration?.units || 'ft',
-        color: generateColor(measurements.length),
+        color: defaultColor || getToolColor('length'),
+        category: defaultCategory || undefined,
         data: { points: currentPoints },
         pageNumber: activePage,
       };
@@ -184,11 +201,12 @@ export default function Viewer({
       const value = calculateArea(currentPoints, calibration);
       const measurement: Measurement = {
         id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-        name: `Area ${measurements.filter(m => m.type === 'area').length + 1}`,
+        name: `Surface ${measurements.filter(m => m.type === 'area').length + 1}`,
         type: 'area',
         value,
         units: calibration?.units || 'ft',
-        color: generateColor(measurements.length),
+        color: defaultColor || getToolColor('area'),
+        category: defaultCategory || undefined,
         data: { points: currentPoints },
         pageNumber: activePage,
       };
@@ -198,7 +216,7 @@ export default function Viewer({
       setIsDrawing(false);
       setPreviewPoint(null);
     }
-  }, [activeMeasurementType, currentPoints, calibration, measurements, activePage, onMeasurementAdd]);
+  }, [activeMeasurementType, currentPoints, calibration, measurements, activePage, onMeasurementAdd, defaultColor, defaultCategory]);
 
   // Cancel active measurement
   const cancelMeasurement = useCallback(() => {
@@ -343,13 +361,57 @@ export default function Viewer({
       }
       // Point addition for existing measurements now happens in handleMouseUp
     } else if (activeTool === 'count') {
+      // Check available categories for "door" or "window" names
+      const allCategories = getAllCategories();
+      const doorCategory = allCategories.find(c => 
+        c.name.toLowerCase().includes('door')
+      );
+      const windowCategory = allCategories.find(c => 
+        c.name.toLowerCase().includes('window')
+      );
+      
+      // Also check existing measurements for door/window patterns
+      const existingCounts = measurements.filter(m => m.type === 'count');
+      const existingDoors = existingCounts.filter(m => 
+        (m.category || '').toLowerCase().includes('door') || 
+        m.name.toLowerCase().includes('door')
+      );
+      const existingWindows = existingCounts.filter(m => 
+        (m.category || '').toLowerCase().includes('window') || 
+        m.name.toLowerCase().includes('window')
+      );
+      
+      // Infer category: prefer defaultCategory, then category name if it exists, otherwise use pattern from measurements
+      let inferredCategory: string | undefined = defaultCategory || undefined;
+      if (!inferredCategory) {
+        if (doorCategory) {
+          inferredCategory = doorCategory.name;
+        } else if (windowCategory) {
+          inferredCategory = windowCategory.name;
+        } else if (existingDoors.length > existingWindows.length) {
+          inferredCategory = 'Door';
+        } else if (existingWindows.length > existingDoors.length) {
+          inferredCategory = 'Window';
+        }
+      }
+      
+      // Default name based on inferred category
+      const countNumber = existingCounts.length + 1;
+      const defaultName = inferredCategory 
+        ? `${inferredCategory} ${existingCounts.filter(m => 
+            (m.category || '').toLowerCase() === inferredCategory?.toLowerCase() ||
+            m.name.toLowerCase().startsWith(inferredCategory.toLowerCase())
+          ).length + 1}`
+        : `Count ${countNumber}`;
+      
       const measurement: Measurement = {
         id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-        name: `Count ${measurements.filter(m => m.type === 'count').length + 1}`,
+        name: defaultName,
         type: 'count',
         value: 1,
         units: 'ft',
-        color: generateColor(measurements.length),
+        color: defaultColor || getToolColor('count'),
+        category: inferredCategory,
         data: { point: imagePos },
         pageNumber: activePage,
       };
@@ -607,11 +669,12 @@ export default function Viewer({
         const value = calculateLength(newPoints, calibration);
         const measurement: Measurement = {
           id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-          name: `Length ${measurements.filter(m => m.type === 'length').length + 1}`,
+          name: `Linear ${measurements.filter(m => m.type === 'length').length + 1}`,
           type: 'length',
           value,
           units: calibration?.units || 'ft',
-          color: generateColor(measurements.length),
+          color: defaultColor || getToolColor('length'),
+          category: defaultCategory || undefined,
           data: { points: newPoints },
           pageNumber: activePage,
         };
@@ -736,16 +799,21 @@ export default function Viewer({
     
     return pageMeasurements.map((measurement) => {
       const isSelected = selectedMeasurementId === measurement.id;
-      const baseStrokeWidth = isSelected ? 3 : 2;
+      const baseStrokeWidth = measurement.type === 'length' 
+        ? (isSelected ? 7 : 5)
+        : (isSelected ? 3.5 : 2.5);
       const strokeWidth = baseStrokeWidth / scale;
+      // Use category color if category exists, otherwise use stored color
+      const measurementColor = measurement.category ? getCategoryColor(measurement.category) : measurement.color;
 
       if (measurement.type === 'length' && measurement.data.points) {
         const points = measurement.data.points.flatMap((p: { x: number; y: number }) => [p.x + imageX, p.y + imageY]);
+        const strokeColor = hexToRgba(measurementColor, 0.6);
         return (
           <Group key={measurement.id} name="measurement" onClick={() => onMeasurementSelect(measurement.id)}>
             <Line
               points={points}
-              stroke={measurement.color}
+              stroke={strokeColor}
               strokeWidth={strokeWidth}
               tension={0}
               lineCap="round"
@@ -757,13 +825,13 @@ export default function Viewer({
                   x={points[0]}
                   y={points[1]}
                   radius={4 / scale}
-                  fill={measurement.color}
+                  fill={hexToRgba(measurementColor, 0.6)}
                 />
                 <Circle
                   x={points[points.length - 2]}
                   y={points[points.length - 1]}
                   radius={4 / scale}
-                  fill={measurement.color}
+                  fill={hexToRgba(measurementColor, 0.6)}
                 />
               </>
             )}
@@ -771,14 +839,15 @@ export default function Viewer({
         );
       } else if (measurement.type === 'area' && measurement.data.points) {
         const points = measurement.data.points.flatMap((p: { x: number; y: number }) => [p.x + imageX, p.y + imageY]);
+        const fillColor = hexToRgba(measurementColor, 0.08);
+        const strokeColor = hexToRgba(measurementColor, 0.4);
         return (
           <Group key={measurement.id} name="measurement" onClick={() => onMeasurementSelect(measurement.id)}>
             <Line
               points={[...points, points[0], points[1]]}
-              stroke={measurement.color}
+              stroke={strokeColor}
               strokeWidth={strokeWidth}
-              fill={measurement.color}
-              fillOpacity={0.2}
+              fill={fillColor}
               closed
             />
             {measurement.data.points.map((p: { x: number; y: number }, i: number) => (
@@ -787,7 +856,7 @@ export default function Viewer({
                 x={p.x + imageX}
                 y={p.y + imageY}
                 radius={4 / scale}
-                fill={measurement.color}
+                fill={hexToRgba(measurementColor, 0.5)}
               />
             ))}
           </Group>
@@ -800,17 +869,16 @@ export default function Viewer({
               x={p.x + imageX}
               y={p.y + imageY}
               radius={8 / scale}
-              stroke={measurement.color}
+              stroke={hexToRgba(measurementColor, 0.5)}
               strokeWidth={strokeWidth}
-              fill={measurement.color}
-              fillOpacity={0.3}
+              fill={hexToRgba(measurementColor, 0.15)}
             />
             <Text
               x={p.x + imageX + 12 / scale}
               y={p.y + imageY - 8 / scale}
               text={measurement.name}
               fontSize={12 / scale}
-              fill={measurement.color}
+              fill={hexToRgba(measurementColor, 0.6)}
               fontStyle="bold"
             />
           </Group>
@@ -870,9 +938,7 @@ export default function Viewer({
     return (
       <div className="flex-1 flex items-center justify-center bg-gray-100">
         <div className="text-center text-gray-400">
-          <svg className="mx-auto h-16 w-16 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
+          <FileText className="mx-auto h-16 w-16 mb-4 text-gray-400" />
           <p className="text-lg">No drawing selected</p>
           <p className="text-sm mt-2">Upload a PDF or image to get started</p>
         </div>
@@ -966,6 +1032,7 @@ export default function Viewer({
                     fill="red"
                     stroke="white"
                     strokeWidth={2 / scale}
+                    opacity={0.7}
                   />
                 ))}
                 {calibrationPoints.length === 2 && (
@@ -979,6 +1046,7 @@ export default function Viewer({
                     stroke="red"
                     strokeWidth={2 / scale}
                     dash={[5 / scale, 5 / scale]}
+                    opacity={0.7}
                   />
                 )}
               </>
@@ -995,6 +1063,7 @@ export default function Viewer({
             const imageX = (stageSize.width - scaledWidth) / 2 / scale;
             const imageY = (stageSize.height - scaledHeight) / 2 / scale;
             const allPoints = previewPoint ? [...currentPoints, previewPoint] : currentPoints;
+            const previewColor = activeMeasurementType ? getToolColor(activeMeasurementType) : '#3B82F6';
             
             return (
               <>
@@ -1005,7 +1074,7 @@ export default function Viewer({
                       x={p.x + imageX}
                       y={p.y + imageY}
                       radius={radius}
-                      fill="blue"
+                      fill={previewColor}
                       stroke="white"
                       strokeWidth={strokeWidth * 0.3}
                       listening={false}
@@ -1018,7 +1087,7 @@ export default function Viewer({
                     x={previewPoint.x + imageX}
                     y={previewPoint.y + imageY}
                     radius={radius}
-                    fill="blue"
+                    fill={previewColor}
                     stroke="white"
                     strokeWidth={strokeWidth * 0.3}
                     listening={false}
@@ -1028,11 +1097,13 @@ export default function Viewer({
                 {allPoints.length > 1 && (
                   <Line
                     points={allPoints.flatMap(p => [p.x + imageX, p.y + imageY])}
-                    stroke="blue"
+                    stroke={previewColor}
                     strokeWidth={strokeWidth}
                     dash={[dashSize, dashSize]}
                     listening={false}
-                    opacity={1}
+                    opacity={activeMeasurementType === 'area' ? 0.6 : 0.7}
+                    fill={activeMeasurementType === 'area' ? previewColor : undefined}
+                    fillOpacity={activeMeasurementType === 'area' ? 0.1 : undefined}
                     lineCap="round"
                     lineJoin="round"
                     closed={activeMeasurementType === 'area' && currentPoints.length >= 3 && previewPoint ? isNearFirstPoint(previewPoint, currentPoints[0]) : false}
@@ -1044,7 +1115,7 @@ export default function Viewer({
                     x={currentPoints[0].x + imageX}
                     y={currentPoints[0].y + imageY}
                     radius={radius * 1.5}
-                    fill="green"
+                    fill={previewColor}
                     stroke="white"
                     strokeWidth={strokeWidth * 0.5}
                     listening={false}
@@ -1063,18 +1134,18 @@ export default function Viewer({
 
       {/* Page Navigation (for PDFs) */}
       {file.type === 'pdf' && pdfPageCount > 1 && (
-        <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-lg px-4 py-2 flex items-center gap-3" style={{ zIndex: 20 }}>
+        <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-black/80 backdrop-blur-md shadow-lg px-4 py-2 flex items-center gap-3 border border-white/10" style={{ zIndex: 20 }}>
           <button
             onClick={(e) => {
               e.stopPropagation();
               onPageChange(Math.max(1, activePage - 1));
             }}
             disabled={activePage === 1}
-            className="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-3 py-1 bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-white"
           >
-            ←
+            <ChevronLeft className="w-4 h-4" />
           </button>
-          <span className="text-sm font-medium">
+          <span className="text-sm font-medium text-white">
             Page {activePage} of {pdfPageCount}
           </span>
           <button
@@ -1083,57 +1154,58 @@ export default function Viewer({
               onPageChange(Math.min(pdfPageCount, activePage + 1));
             }}
             disabled={activePage === pdfPageCount}
-            className="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-3 py-1 bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-white"
           >
-            →
+            <ChevronRight className="w-4 h-4" />
           </button>
         </div>
       )}
 
       {/* Calibration Dialog */}
       {showCalibrationDialog && (
-        <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Calibrate Scale</h3>
-            <p className="text-sm text-gray-600 mb-4">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-black/90 backdrop-blur-md p-6 max-w-md w-full mx-4 border border-white/10 shadow-xl">
+            <h3 className="text-lg font-semibold mb-4 text-white">Calibrate Scale</h3>
+            <p className="text-sm text-white/70 mb-4">
               Enter the real-world distance between the two points you selected.
             </p>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-white/80 mb-1">
                   Distance
                 </label>
                 <input
                   type="number"
                   value={calibrationDistance}
                   onChange={(e) => setCalibrationDistance(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  className="w-full px-3 py-2 bg-white/10 border border-white/20 text-white placeholder-white/40 focus:outline-none focus:border-white/40"
                   placeholder="Enter distance"
                   autoFocus
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-white/80 mb-1">
                   Units
                 </label>
                 <select
                   value={calibrationUnits}
                   onChange={(e) => setCalibrationUnits(e.target.value as Unit)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  className="w-full px-3 py-2 bg-white/10 border border-white/20 text-white focus:outline-none focus:border-white/40"
                 >
-                  <option value="ft">Feet</option>
-                  <option value="in">Inches</option>
-                  <option value="m">Meters</option>
-                  <option value="cm">Centimeters</option>
-                  <option value="mm">Millimeters</option>
+                  <option value="ft" className="bg-black">Feet</option>
+                  <option value="in" className="bg-black">Inches</option>
+                  <option value="m" className="bg-black">Meters</option>
+                  <option value="cm" className="bg-black">Centimeters</option>
+                  <option value="mm" className="bg-black">Millimeters</option>
                 </select>
               </div>
             </div>
             <div className="flex gap-3 mt-6">
               <button
                 onClick={handleCalibrationSubmit}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                className="flex-1 px-4 py-2 bg-white/20 text-white hover:bg-white/30 transition-colors flex items-center justify-center gap-2"
               >
+                <CheckCircle className="w-4 h-4" />
                 Calibrate
               </button>
               <button
@@ -1142,8 +1214,9 @@ export default function Viewer({
                   setCalibrationPoints([]);
                   setCalibrationDistance('');
                 }}
-                className="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                className="flex-1 px-4 py-2 bg-white/5 text-white/70 hover:bg-white/10 transition-colors flex items-center justify-center gap-2"
               >
+                <X className="w-4 h-4" />
                 Cancel
               </button>
             </div>
@@ -1152,10 +1225,13 @@ export default function Viewer({
       )}
 
       {/* Scale indicator */}
-      <div className="absolute top-4 right-4 bg-white rounded-lg shadow-lg px-3 py-2 text-sm">
-        <div>Zoom: {(scale * 100).toFixed(0)}%</div>
+      <div className="absolute top-4 right-4 bg-black/80 backdrop-blur-md shadow-lg px-3 py-2 text-sm border border-white/10">
+        <div className="text-white">Zoom: {(scale * 100).toFixed(0)}%</div>
         {calibration?.isCalibrated && (
-          <div className="text-xs text-green-600 mt-1">✓ Calibrated</div>
+          <div className="text-xs text-green-400 mt-1 flex items-center gap-1">
+            <CheckCircle className="w-3 h-3" />
+            Calibrated
+          </div>
         )}
       </div>
     </div>

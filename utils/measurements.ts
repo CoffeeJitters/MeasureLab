@@ -1,4 +1,5 @@
 import { Measurement, MeasurementType, Unit, ScaleCalibration } from '@/types';
+import { getCategoryColor, getDefaultColor } from './categories';
 
 export const calculateLength = (points: { x: number; y: number }[], calibration: ScaleCalibration | null): number => {
   if (points.length < 2) return 0;
@@ -86,27 +87,23 @@ export const formatMeasurementValue = (value: number, units: Unit, type: Measure
   }
 };
 
-export const generateColor = (index: number): string => {
-  const colors = [
-    '#3B82F6', // blue
-    '#EF4444', // red
-    '#10B981', // green
-    '#F59E0B', // amber
-    '#8B5CF6', // purple
-    '#EC4899', // pink
-    '#06B6D4', // cyan
-    '#84CC16', // lime
-  ];
-  return colors[index % colors.length];
+/**
+ * Generate color for a measurement based on category or default color
+ * @param category - Optional category name
+ * @returns Color hex string
+ */
+export const generateColor = (category?: string): string => {
+  return getCategoryColor(category);
 };
 
 export const exportToCSV = (measurements: Measurement[]): void => {
-  const headers = ['Name', 'Type', 'Value', 'Units', 'Notes'];
+  const headers = ['Name', 'Type', 'Value', 'Units', 'Category', 'Notes'];
   const rows = measurements.map(m => [
     m.name,
     m.type,
     m.value.toString(),
     m.units,
+    m.category || '',
     m.notes || '',
   ]);
 

@@ -1,4 +1,4 @@
-import { Measurement, UploadedFile, ScaleCalibration } from '@/types';
+import { Measurement, UploadedFile, ScaleCalibration, Category } from '@/types';
 
 const STORAGE_KEYS = {
   MEASUREMENTS: 'measurelab_measurements',
@@ -7,6 +7,7 @@ const STORAGE_KEYS = {
   ACTIVE_FILE: 'measurelab_active_file',
   ACTIVE_PAGE: 'measurelab_active_page',
   ACTIVE_TOOL: 'measurelab_active_tool',
+  CATEGORIES: 'measurelab_categories',
 };
 
 export const storage = {
@@ -113,6 +114,24 @@ export const storage = {
     } catch (error) {
       console.error('Failed to load active tool:', error);
       return null;
+    }
+  },
+
+  saveCategories: (categories: Category[]) => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(categories));
+    } catch (error) {
+      console.error('Failed to save categories:', error);
+    }
+  },
+
+  loadCategories: (): Category[] => {
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.CATEGORIES);
+      return data ? JSON.parse(data) : [];
+    } catch (error) {
+      console.error('Failed to load categories:', error);
+      return [];
     }
   },
 };

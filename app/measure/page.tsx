@@ -3,10 +3,12 @@
 import { useState, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
 import Viewer from '@/components/Viewer';
-import Tools from '@/components/Tools';
+import ToolRail from '@/components/ToolRail';
 import TakeoffList from '@/components/TakeoffList';
+import EstimatePanel from '@/components/EstimatePanel';
 import { UploadedFile, Measurement, MeasurementType, ScaleCalibration } from '@/types';
 import { storage } from '@/utils/storage';
+import { getToolColor } from '@/utils/categories';
 
 export default function MeasurePage() {
   const [files, setFiles] = useState<UploadedFile[]>([]);
@@ -16,6 +18,10 @@ export default function MeasurePage() {
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [calibration, setCalibration] = useState<ScaleCalibration | null>(null);
   const [selectedMeasurementId, setSelectedMeasurementId] = useState<string | null>(null);
+  const [rightPanelMode, setRightPanelMode] = useState<'takeoff' | 'estimate'>('takeoff');
+  const [defaultColor, setDefaultColor] = useState<string>(getToolColor('area'));
+  const [defaultCategory, setDefaultCategory] = useState<string>('');
+  const [defaultType, setDefaultType] = useState<MeasurementType | null>(null);
 
   // Load saved state from localStorage
   useEffect(() => {
@@ -94,7 +100,9 @@ export default function MeasurePage() {
 
   const handleMeasurementAdd = (measurement: Measurement) => {
     setMeasurements((prev) => [...prev, measurement]);
-    setActiveTool(null);
+    // Keep length, area, and count tools active after adding a measurement
+    // Only deactivate calibrate tool (which is handled in handleCalibrationUpdate)
+    // Don't deactivate the tool here - let users continue measuring
   };
 
   const handleMeasurementUpdate = (id: string, updates: Partial<Measurement>) => {
@@ -126,7 +134,7 @@ export default function MeasurePage() {
         onFileSelect={handleFileSelect}
         onFileRemove={handleFileRemove}
       />
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col relative">
         <Viewer
           file={activeFile}
           activePage={activePage}
@@ -138,20 +146,36 @@ export default function MeasurePage() {
           onCalibrationUpdate={handleCalibrationUpdate}
           selectedMeasurementId={selectedMeasurementId}
           onMeasurementSelect={setSelectedMeasurementId}
+          defaultColor={defaultColor}
+          defaultCategory={defaultCategory}
+          defaultType={defaultType}
         />
-        <Tools
+        <ToolRail
           activeTool={activeTool}
           onToolSelect={setActiveTool}
           isCalibrated={calibration?.isCalibrated || false}
+          defaultColor={defaultColor}
+          defaultCategory={defaultCategory}
+          defaultType={defaultType}
+          onColorChange={setDefaultColor}
+          onCategoryChange={setDefaultCategory}
+          onTypeChange={setDefaultType}
+          rightPanelMode={rightPanelMode}
+          onRightPanelModeChange={setRightPanelMode}
         />
       </div>
-      <TakeoffList
-        measurements={measurements}
-        onMeasurementUpdate={handleMeasurementUpdate}
-        onMeasurementDelete={handleMeasurementDelete}
-        onMeasurementSelect={setSelectedMeasurementId}
-        selectedMeasurementId={selectedMeasurementId}
-      />
+      {/* Right Panel */}
+      {rightPanelMode === 'takeoff' ? (
+        <TakeoffList
+          measurements={measurements}
+          onMeasurementUpdate={handleMeasurementUpdate}
+          onMeasurementDelete={handleMeasurementDelete}
+          onMeasurementSelect={setSelectedMeasurementId}
+          selectedMeasurementId={selectedMeasurementId}
+        />
+      ) : (
+        <EstimatePanel measurements={measurements} />
+      )}
     </div>
   );
 }

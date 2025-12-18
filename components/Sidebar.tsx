@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { UploadedFile } from '@/types';
 import { storage } from '@/utils/storage';
+import { Upload, X, FileText } from 'lucide-react';
 
 interface SidebarProps {
   files: UploadedFile[];
@@ -50,24 +51,22 @@ export default function Sidebar({ files, activeFileId, onFileAdd, onFileSelect, 
   };
 
   return (
-    <div className="w-64 bg-gray-50 border-r border-gray-200 flex flex-col h-screen">
-      <div className="p-4 border-b border-gray-200">
-        <h2 className="text-lg font-semibold text-gray-800">Drawings</h2>
+    <div className="w-64 bg-gradient-to-b from-black/90 via-black/85 to-black/90 border-r border-white/5 flex flex-col h-screen">
+      <div className="px-4 py-3 border-b border-white/5">
+        <h2 className="text-sm font-medium text-white/80">Drawings</h2>
       </div>
 
       <div
-        className={`flex-1 overflow-y-auto p-4 ${isDragging ? 'bg-blue-50' : ''}`}
+        className={`flex-1 overflow-y-auto p-4 ${isDragging ? 'bg-white/5' : ''}`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
         <label className="block mb-4">
-          <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors">
-            <svg className="mx-auto h-8 w-8 text-gray-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
-            <span className="text-sm text-gray-600">Click to upload or drag files</span>
-            <span className="text-xs text-gray-500 block mt-1">PDF, PNG, JPG</span>
+          <div className="border border-dashed border-white/10 p-6 text-center cursor-pointer hover:border-white/20 hover:bg-white/3 transition-colors rounded">
+            <Upload className="mx-auto h-6 w-6 text-white/50 mb-2" strokeWidth={1.5} />
+            <span className="text-xs text-white/70">Click to upload or drag files</span>
+            <span className="text-[10px] text-white/40 block mt-1">PDF, PNG, JPG</span>
           </div>
           <input
             type="file"
@@ -78,23 +77,26 @@ export default function Sidebar({ files, activeFileId, onFileAdd, onFileSelect, 
           />
         </label>
 
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           {files.map((file) => (
             <div
               key={file.id}
-              className={`p-3 rounded-lg border cursor-pointer transition-colors ${
+              className={`px-3 py-2 border rounded cursor-pointer transition-all duration-75 ${
                 activeFileId === file.id
-                  ? 'bg-blue-100 border-blue-400'
-                  : 'bg-white border-gray-200 hover:border-gray-300'
+                  ? 'bg-white/5 border-white/10'
+                  : 'bg-white/3 border-white/5 hover:border-white/10 hover:bg-white/5'
               }`}
               onClick={() => onFileSelect(file.id)}
             >
               <div className="flex items-start justify-between">
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-800 truncate">{file.name}</p>
-                  <p className="text-xs text-gray-500 mt-1">{file.type.toUpperCase()}</p>
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-3.5 h-3.5 text-white/50 flex-shrink-0" strokeWidth={1.5} />
+                    <p className="text-xs font-medium text-white/80 truncate">{file.name}</p>
+                  </div>
+                  <p className="text-[10px] text-white/40 mt-0.5">{file.type.toUpperCase()}</p>
                   {file.pageCount && (
-                    <p className="text-xs text-gray-500">{file.pageCount} page{file.pageCount !== 1 ? 's' : ''}</p>
+                    <p className="text-[10px] text-white/40">{file.pageCount} page{file.pageCount !== 1 ? 's' : ''}</p>
                   )}
                 </div>
                 <button
@@ -102,12 +104,10 @@ export default function Sidebar({ files, activeFileId, onFileAdd, onFileSelect, 
                     e.stopPropagation();
                     onFileRemove(file.id);
                   }}
-                  className="ml-2 text-gray-400 hover:text-red-500 transition-colors"
+                  className="ml-2 text-white/30 hover:text-white/60 transition-colors"
                   title="Remove file"
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  <X className="w-3.5 h-3.5" strokeWidth={1.5} />
                 </button>
               </div>
             </div>
@@ -115,7 +115,7 @@ export default function Sidebar({ files, activeFileId, onFileAdd, onFileSelect, 
         </div>
 
         {files.length === 0 && (
-          <div className="text-center text-gray-400 text-sm mt-8">
+          <div className="text-center text-white/40 text-xs mt-8">
             No drawings uploaded yet
           </div>
         )}
