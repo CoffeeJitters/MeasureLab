@@ -1,4 +1,5 @@
-import { Measurement, UploadedFile, ScaleCalibration, Category } from '@/types';
+import { Measurement, UploadedFile, ScaleCalibration, Category, Group } from '@/types';
+import { EstimateSettings } from '@/lib/estimate/config';
 
 const STORAGE_KEYS = {
   MEASUREMENTS: 'measurelab_measurements',
@@ -8,10 +9,18 @@ const STORAGE_KEYS = {
   ACTIVE_PAGE: 'measurelab_active_page',
   ACTIVE_TOOL: 'measurelab_active_tool',
   CATEGORIES: 'measurelab_categories',
+  GROUPS: 'measurelab_groups',
+  ESTIMATE_SETTINGS: 'measurelab_estimate_settings',
+};
+
+// Check if localStorage is available (browser environment)
+const isLocalStorageAvailable = (): boolean => {
+  return typeof window !== 'undefined' && typeof localStorage !== 'undefined';
 };
 
 export const storage = {
   saveMeasurements: (measurements: Measurement[]) => {
+    if (!isLocalStorageAvailable()) return;
     try {
       localStorage.setItem(STORAGE_KEYS.MEASUREMENTS, JSON.stringify(measurements));
     } catch (error) {
@@ -20,6 +29,7 @@ export const storage = {
   },
 
   loadMeasurements: (): Measurement[] => {
+    if (!isLocalStorageAvailable()) return [];
     try {
       const data = localStorage.getItem(STORAGE_KEYS.MEASUREMENTS);
       return data ? JSON.parse(data) : [];
@@ -30,6 +40,7 @@ export const storage = {
   },
 
   saveFiles: (files: Omit<UploadedFile, 'file'>[]) => {
+    if (!isLocalStorageAvailable()) return;
     try {
       localStorage.setItem(STORAGE_KEYS.FILES, JSON.stringify(files));
     } catch (error) {
@@ -38,6 +49,7 @@ export const storage = {
   },
 
   loadFiles: (): Omit<UploadedFile, 'file'>[] => {
+    if (!isLocalStorageAvailable()) return [];
     try {
       const data = localStorage.getItem(STORAGE_KEYS.FILES);
       return data ? JSON.parse(data) : [];
@@ -48,6 +60,7 @@ export const storage = {
   },
 
   saveCalibration: (calibration: ScaleCalibration) => {
+    if (!isLocalStorageAvailable()) return;
     try {
       localStorage.setItem(STORAGE_KEYS.CALIBRATION, JSON.stringify(calibration));
     } catch (error) {
@@ -56,6 +69,7 @@ export const storage = {
   },
 
   loadCalibration: (): ScaleCalibration | null => {
+    if (!isLocalStorageAvailable()) return null;
     try {
       const data = localStorage.getItem(STORAGE_KEYS.CALIBRATION);
       return data ? JSON.parse(data) : null;
@@ -66,6 +80,7 @@ export const storage = {
   },
 
   saveActiveFile: (fileId: string | null) => {
+    if (!isLocalStorageAvailable()) return;
     try {
       localStorage.setItem(STORAGE_KEYS.ACTIVE_FILE, fileId || '');
     } catch (error) {
@@ -74,6 +89,7 @@ export const storage = {
   },
 
   loadActiveFile: (): string | null => {
+    if (!isLocalStorageAvailable()) return null;
     try {
       return localStorage.getItem(STORAGE_KEYS.ACTIVE_FILE) || null;
     } catch (error) {
@@ -83,6 +99,7 @@ export const storage = {
   },
 
   saveActivePage: (pageNumber: number) => {
+    if (!isLocalStorageAvailable()) return;
     try {
       localStorage.setItem(STORAGE_KEYS.ACTIVE_PAGE, pageNumber.toString());
     } catch (error) {
@@ -91,6 +108,7 @@ export const storage = {
   },
 
   loadActivePage: (): number => {
+    if (!isLocalStorageAvailable()) return 1;
     try {
       const data = localStorage.getItem(STORAGE_KEYS.ACTIVE_PAGE);
       return data ? parseInt(data, 10) : 1;
@@ -101,6 +119,7 @@ export const storage = {
   },
 
   saveActiveTool: (tool: MeasurementType | 'calibrate' | null) => {
+    if (!isLocalStorageAvailable()) return;
     try {
       localStorage.setItem(STORAGE_KEYS.ACTIVE_TOOL, tool || '');
     } catch (error) {
@@ -109,6 +128,7 @@ export const storage = {
   },
 
   loadActiveTool: (): MeasurementType | 'calibrate' | null => {
+    if (!isLocalStorageAvailable()) return null;
     try {
       return localStorage.getItem(STORAGE_KEYS.ACTIVE_TOOL) as MeasurementType | 'calibrate' | null;
     } catch (error) {
@@ -118,6 +138,7 @@ export const storage = {
   },
 
   saveCategories: (categories: Category[]) => {
+    if (!isLocalStorageAvailable()) return;
     try {
       localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(categories));
     } catch (error) {
@@ -126,12 +147,53 @@ export const storage = {
   },
 
   loadCategories: (): Category[] => {
+    if (!isLocalStorageAvailable()) return [];
     try {
       const data = localStorage.getItem(STORAGE_KEYS.CATEGORIES);
       return data ? JSON.parse(data) : [];
     } catch (error) {
       console.error('Failed to load categories:', error);
       return [];
+    }
+  },
+
+  saveGroups: (groups: Group[]) => {
+    if (!isLocalStorageAvailable()) return;
+    try {
+      localStorage.setItem(STORAGE_KEYS.GROUPS, JSON.stringify(groups));
+    } catch (error) {
+      console.error('Failed to save groups:', error);
+    }
+  },
+
+  loadGroups: (): Group[] => {
+    if (!isLocalStorageAvailable()) return [];
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.GROUPS);
+      return data ? JSON.parse(data) : [];
+    } catch (error) {
+      console.error('Failed to load groups:', error);
+      return [];
+    }
+  },
+
+  saveEstimateSettings: (settings: EstimateSettings) => {
+    if (!isLocalStorageAvailable()) return;
+    try {
+      localStorage.setItem(STORAGE_KEYS.ESTIMATE_SETTINGS, JSON.stringify(settings));
+    } catch (error) {
+      console.error('Failed to save estimate settings:', error);
+    }
+  },
+
+  loadEstimateSettings: (): EstimateSettings | null => {
+    if (!isLocalStorageAvailable()) return null;
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.ESTIMATE_SETTINGS);
+      return data ? JSON.parse(data) : null;
+    } catch (error) {
+      console.error('Failed to load estimate settings:', error);
+      return null;
     }
   },
 };

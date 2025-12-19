@@ -1,5 +1,5 @@
 import { Measurement, MeasurementType, Unit, ScaleCalibration } from '@/types';
-import { getCategoryColor, getDefaultColor } from './categories';
+import { getCategoryColor } from './categories';
 
 export const calculateLength = (points: { x: number; y: number }[], calibration: ScaleCalibration | null): number => {
   if (points.length < 2) return 0;

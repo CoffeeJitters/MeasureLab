@@ -9,49 +9,29 @@
 
 import { Measurement } from '@/types';
 import { EstimateInputs, Opening } from './types';
+import { EstimateSettings, defaultEstimateSettings } from './config';
 
 /**
  * Map takeoff measurements to estimate inputs
  * 
- * This function analyzes the measurements array and derives:
- * - Wall area SF (from area measurements categorized/named as walls)
- * - Ceiling area SF (from area measurements categorized/named as ceilings)
- * - Wall linear feet (from length measurements for walls)
- * - Ceiling perimeter feet (from length measurements for ceiling perimeter)
- * - Openings (from count measurements or area measurements marked as doors/windows)
+ * Rules:
+ * 1) Surface measurements (area type) → Always contribute to ceilingSF
+ * 2) Linear measurements (length type) → Convert LF to wallSF using wall height
+ * 3) Count measurements → Openings if marked as door/window
  * 
  * @param measurements - Array of measurements from takeoff
+ * @param settings - Estimate settings (defaultWallHeightFt, etc.)
  * @returns EstimateInputs ready for calculation
  */
-export function mapTakeoffToEstimateInputs(measurements: Measurement[]): EstimateInputs {
+export function mapTakeoffToEstimateInputs(
+  measurements: Measurement[],
+  settings: EstimateSettings = defaultEstimateSettings
+): EstimateInputs {
   let wallAreaSF = 0;
   let ceilingAreaSF = 0;
   let wallLinearFt = 0;
   let ceilingPerimeterFt = 0;
   const openings: Opening[] = [];
-
-  // Helper to check if a measurement is categorized/named as a wall
-  const isWall = (m: Measurement): boolean => {
-    const categoryLower = (m.category || '').toLowerCase();
-    const nameLower = m.name.toLowerCase();
-    return (
-      categoryLower.includes('wall') ||
-      nameLower.includes('wall') ||
-      // If no clear indicator, assume area measurements without ceiling indicators are walls
-      (m.type === 'area' && !isCeiling(m) && !isOpening(m))
-    );
-  };
-
-  // Helper to check if a measurement is categorized/named as a ceiling
-  const isCeiling = (m: Measurement): boolean => {
-    const categoryLower = (m.category || '').toLowerCase();
-    const nameLower = m.name.toLowerCase();
-    return (
-      categoryLower.includes('ceiling') ||
-      nameLower.includes('ceiling') ||
-      nameLower.includes('ceiling')
-    );
-  };
 
   // Helper to check if a measurement represents an opening
   const isOpening = (m: Measurement): boolean => {
@@ -69,20 +49,12 @@ export function mapTakeoffToEstimateInputs(measurements: Measurement[]): Estimat
 
   // Process each measurement
   for (const measurement of measurements) {
-    // Note: calculateArea() and calculateLength() already convert to feet/ft²,
-    // so the value is already in the correct units regardless of measurement.units field
-    // The units field just indicates what unit was used for calibration
-    const valueInSF = measurement.type === 'area' 
-      ? measurement.value  // Already in square feet
-      : measurement.value;  // Already in linear feet (we'll use it as LF)
-
     if (measurement.type === 'area') {
+      // Rule 1: Surface measurements → Always ceilingSF
+      // (unless it's an opening)
       if (isOpening(measurement)) {
         // This is an opening - try to extract dimensions
-        // If it's an area measurement, we need to estimate dimensions
-        // TODO: If takeoff system adds width/height fields, use those
-        // For now, assume standard door (3x7) or window (4x4) based on area
-        const areaSF = valueInSF;
+        const areaSF = measurement.value; // Already in square feet
         let widthFt: number;
         let heightFt: number;
         let type: 'door' | 'window' | 'other' = 'other';
@@ -111,28 +83,25 @@ export function mapTakeoffToEstimateInputs(measurements: Measurement[]): Estimat
           areaSF,
           description: measurement.name,
         });
-      } else if (isCeiling(measurement)) {
-        ceilingAreaSF += valueInSF;
-      } else if (isWall(measurement)) {
-        wallAreaSF += valueInSF;
       } else {
-        // Unclassified area measurement - default to wall
-        // TODO: Could prompt user or use a default assumption
-        wallAreaSF += valueInSF;
+        // Surface measurement = ceiling only
+        ceilingAreaSF += measurement.value;
       }
     } else if (measurement.type === 'length') {
-      const valueInLF = measurement.value; // Already in linear feet
-      if (isCeiling(measurement) || measurement.name.toLowerCase().includes('perimeter')) {
-        ceilingPerimeterFt += valueInLF;
-      } else if (isWall(measurement)) {
-        wallLinearFt += valueInLF;
-      } else {
-        // Unclassified length measurement - default to wall
-        wallLinearFt += valueInLF;
-      }
+      // Rule 2: Linear measurements → Convert LF to wallSF
+      const linearLF = measurement.value; // Already in linear feet
+      
+      // Use overrideHeight if available, otherwise use default from settings
+      const wallHeightFt = measurement.overrideHeight ?? settings.defaultWallHeightFt;
+      
+      // Convert LF to wallSF: wallSF = LF * wallHeight
+      const wallSF = linearLF * wallHeightFt;
+      wallAreaSF += wallSF;
+      
+      // Also track linear feet for corner bead calculations
+      wallLinearFt += linearLF;
     } else if (measurement.type === 'count') {
-      // Count measurements might represent openings
-      // If categorized/named as door/window, create opening entries
+      // Rule 3: Count measurements → Openings if marked as door/window
       if (isOpening(measurement)) {
         const count = measurement.value || 1;
         // Default dimensions for counted openings
@@ -152,15 +121,13 @@ export function mapTakeoffToEstimateInputs(measurements: Measurement[]): Estimat
         }
       }
       // Otherwise, count measurements are not used in estimate
-      // TODO: If takeoff system adds specific count types (e.g., "outlets", "switches"),
-      //       those could be used for additional pricing
     }
   }
 
   // Build notes about assumptions made
   const notes: string[] = [];
   if (wallAreaSF === 0 && ceilingAreaSF === 0) {
-    notes.push('No area measurements found. Please add wall and ceiling area measurements.');
+    notes.push('No measurements found. Add Surface measurements for ceilings and Linear measurements for walls.');
   }
   
   // Check for count measurements

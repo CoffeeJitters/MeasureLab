@@ -1,4 +1,5 @@
 export type MeasurementType = 'length' | 'area' | 'count';
+export type ToolType = MeasurementType | 'calibrate' | 'select' | 'pan';
 
 export type Unit = 'ft' | 'in' | 'm' | 'cm' | 'mm';
 
@@ -18,6 +19,8 @@ export interface Measurement {
   notes?: string;
   data: any; // Tool-specific data (points, polygon, etc.)
   pageNumber?: number;
+  groupId?: string | null; // Group identifier - null or undefined means ungrouped
+  overrideHeight?: number; // Optional wall height override for Linear measurements (in feet)
 }
 
 export interface UploadedFile {
@@ -34,5 +37,11 @@ export interface ScaleCalibration {
   realDistance: number;
   units: Unit;
   isCalibrated: boolean;
+}
+
+export interface Group {
+  id: string;
+  name: string;
+  createdAt: number;
 }
 

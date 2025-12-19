@@ -12,20 +12,24 @@ import {
   Pricing,
   EstimateLineItem,
 } from './types';
-import { EstimateConfig, defaultEstimateConfig } from './config';
+import { EstimateConfig, defaultEstimateConfig, EstimateSettings, defaultEstimateSettings, getSheetAreaSF } from './config';
 
 /**
  * Calculate material quantities needed for the estimate
  */
 export function calculateMaterials(
   inputs: EstimateInputs,
-  config: EstimateConfig = defaultEstimateConfig
+  config: EstimateConfig = defaultEstimateConfig,
+  settings: EstimateSettings = defaultEstimateSettings
 ): MaterialQuantities {
-  const areas = calculateAreas(inputs);
-  const totalSF = areas.totalSF;
+  const areas = calculateAreas(inputs, settings);
+  const totalSF = areas.totalDrywallSF; // Use totalDrywallSF (with waste) for material calculations
+
+  // Get sheet area from config (already updated from settings)
+  const sheetAreaSF = config.materials.sheetSizeSF;
 
   // Drywall sheets (round up)
-  const sheets = Math.ceil(totalSF / config.materials.sheetSizeSF);
+  const sheets = Math.ceil(totalSF / sheetAreaSF);
 
   // Screws (1 per SF, rounded up to nearest 1000)
   const screws = Math.ceil(totalSF * config.materials.screwsPerSF / 1000) * 1000;
@@ -58,10 +62,11 @@ export function calculateMaterials(
 export function calculateLabor(
   inputs: EstimateInputs,
   finishLevel: 1 | 2 | 3 | 4 | 5 = 3,
-  config: EstimateConfig = defaultEstimateConfig
+  config: EstimateConfig = defaultEstimateConfig,
+  settings: EstimateSettings = defaultEstimateSettings
 ): LaborHours {
-  const areas = calculateAreas(inputs);
-  const totalSF = areas.totalSF;
+  const areas = calculateAreas(inputs, settings);
+  const totalSF = areas.totalDrywallSF; // Use totalDrywallSF (with waste) for labor calculations
 
   // Hanging hours
   const hanging = totalSF * config.labor.hangingHoursPerSF;
@@ -98,7 +103,8 @@ export function calculatePricing(
   materials: MaterialQuantities,
   labor: LaborHours,
   finishLevel: 1 | 2 | 3 | 4 | 5 = 3,
-  config: EstimateConfig = defaultEstimateConfig
+  config: EstimateConfig = defaultEstimateConfig,
+  settings: EstimateSettings = defaultEstimateSettings
 ): Pricing {
   // Material costs
   const sheetCost = materials.sheets * config.pricing.sheetPrice;
@@ -145,12 +151,16 @@ export function calculatePricing(
 }
 
 /**
- * Calculate net areas after subtracting openings
+ * Calculate net areas after subtracting openings, with waste factor
  */
-export function calculateAreas(inputs: EstimateInputs): {
+export function calculateAreas(
+  inputs: EstimateInputs,
+  settings: EstimateSettings = defaultEstimateSettings
+): {
   netWallSF: number;
   netCeilingSF: number;
   totalSF: number;
+  totalDrywallSF: number;
 } {
   // Sum opening areas
   const totalOpeningSF = inputs.openings.reduce((sum, opening) => sum + opening.areaSF, 0);
@@ -158,16 +168,20 @@ export function calculateAreas(inputs: EstimateInputs): {
   // Net wall area (subtract openings from wall area)
   const netWallSF = Math.max(0, inputs.wallAreaSF - totalOpeningSF);
 
-  // Net ceiling area (no openings subtracted typically)
+  // Net ceiling area (no openings subtracted)
   const netCeilingSF = inputs.ceilingAreaSF;
 
-  // Total area
+  // Total area before waste
   const totalSF = netWallSF + netCeilingSF;
+
+  // Apply waste factor: totalDrywallSF = (wallSF + ceilingSF - openingSF) * (1 + waste%)
+  const totalDrywallSF = totalSF * (1 + settings.wastePercent / 100);
 
   return {
     netWallSF,
     netCeilingSF,
     totalSF,
+    totalDrywallSF,
   };
 }
 
@@ -180,13 +194,17 @@ export function generateLineItems(
   labor: LaborHours,
   pricing: Pricing,
   finishLevel: 1 | 2 | 3 | 4 | 5 = 3,
-  config: EstimateConfig = defaultEstimateConfig
+  config: EstimateConfig = defaultEstimateConfig,
+  settings: EstimateSettings = defaultEstimateSettings
 ): EstimateLineItem[] {
   const items: EstimateLineItem[] = [];
 
+  // Get sheet size label
+  const sheetSizeLabel = settings.drywallSheetSize;
+
   // Material line items
   items.push({
-    description: 'Drywall Sheets (4x8)',
+    description: `Drywall Sheets (${sheetSizeLabel})`,
     quantity: materials.sheets,
     unit: 'sheets',
     unitPrice: config.pricing.sheetPrice,
@@ -301,17 +319,31 @@ export function generateLineItems(
 export function calculateEstimate(
   inputs: EstimateInputs,
   finishLevel: 1 | 2 | 3 | 4 | 5 = 3,
-  config: EstimateConfig = defaultEstimateConfig
+  config: EstimateConfig = defaultEstimateConfig,
+  settings: EstimateSettings = defaultEstimateSettings
 ): EstimateResult {
-  const areas = calculateAreas(inputs);
-  const materials = calculateMaterials(inputs, config);
-  const labor = calculateLabor(inputs, finishLevel, config);
-  const pricing = calculatePricing(inputs, materials, labor, finishLevel, config);
-  const lineItems = generateLineItems(inputs, materials, labor, pricing, finishLevel, config);
+  // Update config with sheet size from settings
+  const updatedConfig: EstimateConfig = {
+    ...config,
+    materials: {
+      ...config.materials,
+      sheetSizeSF: getSheetAreaSF(settings.drywallSheetSize),
+    },
+  };
+
+  const areas = calculateAreas(inputs, settings);
+  const materials = calculateMaterials(inputs, updatedConfig, settings);
+  const labor = calculateLabor(inputs, finishLevel, updatedConfig, settings);
+  const pricing = calculatePricing(inputs, materials, labor, finishLevel, updatedConfig, settings);
+  const lineItems = generateLineItems(inputs, materials, labor, pricing, finishLevel, updatedConfig, settings);
 
   return {
     inputs,
-    areas,
+    areas: {
+      netWallSF: areas.netWallSF,
+      netCeilingSF: areas.netCeilingSF,
+      totalSF: areas.totalDrywallSF, // Return totalDrywallSF as totalSF for display
+    },
     materials,
     labor,
     pricing,

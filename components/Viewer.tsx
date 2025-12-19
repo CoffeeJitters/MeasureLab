@@ -1,15 +1,21 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Stage, Layer, Line, Circle, Text, Group, Image as KonvaImage } from 'react-konva';
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { Stage, Layer, Line, Circle, Text, Group, Image as KonvaImage, Rect } from 'react-konva';
 import Konva from 'konva';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import { UploadedFile, Measurement, MeasurementType, ScaleCalibration, Unit } from '@/types';
 import { calculateLength, calculateArea } from '@/utils/measurements';
-import { getDefaultColor, getCategoryColor, getToolColor, getAllCategories } from '@/utils/categories';
-import { ChevronLeft, ChevronRight, CheckCircle, FileText, X } from 'lucide-react';
+import { getCategoryColor, getToolColor } from '@/utils/categories';
+import { calculateImageOffset, pointerToImageCoordinates } from '@/utils/coordinates';
+import { updateSelectionWithModifiers } from '@/utils/selection';
+import { pointInRect, lineIntersectsRect, linesIntersect, getBoundingBox, rectsIntersect, isPointNear } from '@/utils/geometry';
+import { CANVAS, PERFORMANCE, STORAGE, MEASUREMENT } from '@/utils/constants';
+import { throttleRAF } from '@/utils/throttle';
+import { ChevronLeft, ChevronRight, CheckCircle, FileText, X, Maximize2 } from 'lucide-react';
+import ContextMenu from './ContextMenu';
 
 // Convert hex color to RGBA with specified opacity
 const hexToRgba = (hex: string, opacity: number): string => {
@@ -24,20 +30,43 @@ if (typeof window !== 'undefined') {
   pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 }
 
+// Helper function to check if a Konva node is a measurement shape
+const isMeasurementNode = (node: any): { isMeasurement: boolean; measurementId: string | null } => {
+  let current: any = node;
+  while (current) {
+    const nodeName = current.name?.();
+    if (nodeName === 'measurement') {
+      return {
+        isMeasurement: true,
+        measurementId: current.id() || null,
+      };
+    }
+    current = current.getParent?.();
+  }
+  return { isMeasurement: false, measurementId: null };
+};
+
+// Geometry helpers are now imported from utils/geometry.ts
+
 interface ViewerProps {
   file: UploadedFile | null;
   activePage: number;
   onPageChange: (page: number) => void;
-  activeTool: MeasurementType | 'calibrate' | null;
+  activeTool: MeasurementType | 'calibrate' | 'select' | 'pan' | null;
   measurements: Measurement[];
   calibration: ScaleCalibration | null;
   onMeasurementAdd: (measurement: Measurement) => void;
+  onMeasurementUpdate?: (id: string, updates: Partial<Measurement>) => void;
   onCalibrationUpdate: (calibration: ScaleCalibration) => void;
-  selectedMeasurementId: string | null;
-  onMeasurementSelect: (id: string | null) => void;
+  selectedMeasurementIds: Set<string>;
+  onMeasurementSelect: (ids: Set<string>) => void;
+  onMeasurementDelete?: (ids: Set<string>) => void;
+  onGroup?: () => void;
+  onUngroup?: () => void;
   defaultColor?: string;
   defaultCategory?: string;
   defaultType?: MeasurementType | null;
+  isDialogOpen?: boolean; // Prevents deletion when dialog is open
 }
 
 export default function Viewer({
@@ -48,12 +77,17 @@ export default function Viewer({
   measurements,
   calibration,
   onMeasurementAdd,
+  onMeasurementUpdate,
   onCalibrationUpdate,
-  selectedMeasurementId,
+  selectedMeasurementIds,
   onMeasurementSelect,
+  onMeasurementDelete,
+  onGroup,
+  onUngroup,
   defaultColor,
   defaultCategory,
   defaultType,
+  isDialogOpen = false,
 }: ViewerProps) {
   const [scale, setScale] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -74,9 +108,46 @@ export default function Viewer({
   const [showCalibrationDialog, setShowCalibrationDialog] = useState(false);
   const [calibrationDistance, setCalibrationDistance] = useState('');
   const [calibrationUnits, setCalibrationUnits] = useState<Unit>('ft');
+  // Multi-select state
+  const [selectionRect, setSelectionRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const pendingSelectionRect = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const justCompletedSelectionRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
+  const layerRef = useRef<Konva.Layer>(null);
   const pdfContainerRef = useRef<HTMLDivElement>(null);
+  // Ref for selection rectangle node to update directly during drag (avoids React re-renders)
+  const selectionRectRef = useRef<Konva.Rect | null>(null);
+  // Track if we're currently dragging selection to prevent measurement re-renders
+  const isDraggingSelectionRef = useRef(false);
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  // Track right-click to prevent onClick from clearing selection
+  const isRightClickRef = useRef(false);
+  // Ref to track current selection count for context menu handler (avoids stale closure)
+  const selectedCountRef = useRef(0);
+
+  // Calculate image offset within stage coordinates (memoized for performance)
+  const imageOffset = useMemo(() => {
+    return calculateImageOffset(stageSize, imageSize, scale);
+  }, [stageSize, imageSize, scale]);
+
+  // Helper function to convert pointer to image coordinates
+  const getImageCoordinatesFromPointer = useCallback((
+    pointerX: number,
+    pointerY: number
+  ): { x: number; y: number } => {
+    return pointerToImageCoordinates(
+      pointerX,
+      pointerY,
+      position,
+      scale,
+      imageOffset
+    );
+  }, [position, scale, imageOffset]);
 
   // Load image or PDF page
   useEffect(() => {
@@ -145,7 +216,7 @@ export default function Viewer({
             }
           };
         }
-      }, 500);
+      }, STORAGE.PDF_CANVAS_EXTRACTION_DELAY);
       return () => clearTimeout(timer);
     }
   }, [file, activePage]);
@@ -155,24 +226,59 @@ export default function Viewer({
     const stage = e.target.getStage();
     if (!stage) return;
 
-    const oldScale = stage.scaleX();
+    const oldScale = scale;
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
 
+    // Cursor-anchored zoom: Calculate the point in IMAGE coordinates under the cursor
+    // Step 1: Convert pointer to stage coordinates (accounting for pan and zoom)
+    const stageX = (pointer.x - position.x) / oldScale;
+    const stageY = (pointer.y - position.y) / oldScale;
+    // Step 2: Convert stage coordinates to image coordinates (accounting for imageOffset)
     const mousePointTo = {
-      x: (pointer.x - stage.x()) / oldScale,
-      y: (pointer.y - stage.y()) / oldScale,
+      x: stageX - imageOffset.x,
+      y: stageY - imageOffset.y,
     };
 
-    const newScale = e.evt.deltaY > 0 ? oldScale * 0.9 : oldScale * 1.1;
-    const clampedScale = Math.max(0.1, Math.min(5, newScale));
+    // Calculate new scale (zoom in/out)
+    const newScale = e.evt.deltaY > 0 ? oldScale * CANVAS.ZOOM_FACTOR_OUT : oldScale * CANVAS.ZOOM_FACTOR_IN;
+    const clampedScale = Math.max(CANVAS.MIN_SCALE, Math.min(CANVAS.MAX_SCALE, newScale));
+
+    // Adjust position so the same point stays under the cursor
+    // Calculate what imageOffset will be with the new scale (CRITICAL: use new scale, not old!)
+    const newImageOffset = calculateImageOffset(stageSize, imageSize, clampedScale);
+    // Step 1: Convert image coordinates back to stage coordinates with new scale
+    const newStageX = mousePointTo.x + newImageOffset.x;
+    const newStageY = mousePointTo.y + newImageOffset.y;
+    // Step 2: Calculate new position to keep the point under cursor
+    // newPosition = pointer - (stageCoords * newScale)
+    const newPosition = {
+      x: pointer.x - newStageX * clampedScale,
+      y: pointer.y - newStageY * clampedScale,
+    };
 
     setScale(clampedScale);
-    setPosition({
-      x: pointer.x - mousePointTo.x * clampedScale,
-      y: pointer.y - mousePointTo.y * clampedScale,
-    });
-  }, []);
+    setPosition(newPosition);
+  }, [scale, position, imageOffset, imageSize, stageSize]);
+
+  // Fit page to view
+  const handleFitToView = useCallback(() => {
+    if (!file || imageSize.width === 0 || imageSize.height === 0 || stageSize.width === 0 || stageSize.height === 0) return;
+    
+    // Calculate fit scale: min of width and height ratios to fit both dimensions
+    // This ensures the page fits fully inside the viewport (both width and height)
+    const scaleFit = Math.min(
+      stageSize.width / imageSize.width,
+      stageSize.height / imageSize.height
+    );
+    
+    // Clamp to reasonable bounds (allow fit even if below current min zoom)
+    const clampedScale = Math.max(CANVAS.MIN_SCALE, Math.min(CANVAS.MAX_SCALE, scaleFit));
+    
+    // Set scale and reset position to center the page
+    setScale(clampedScale);
+    setPosition({ x: 0, y: 0 });
+  }, [file, imageSize, stageSize]);
 
   // Finish active measurement
   const finishMeasurement = useCallback(() => {
@@ -186,7 +292,7 @@ export default function Viewer({
         type: 'length',
         value,
         units: calibration?.units || 'ft',
-        color: defaultColor || getToolColor('length'),
+        color: getToolColor('length'),
         category: defaultCategory || undefined,
         data: { points: currentPoints },
         pageNumber: activePage,
@@ -205,7 +311,7 @@ export default function Viewer({
         type: 'area',
         value,
         units: calibration?.units || 'ft',
-        color: defaultColor || getToolColor('area'),
+        color: getToolColor('area'),
         category: defaultCategory || undefined,
         data: { points: currentPoints },
         pageNumber: activePage,
@@ -229,35 +335,152 @@ export default function Viewer({
   }, [activeMeasurementType]);
 
   // Check if click is near first point (for closing area polygon)
-  const isNearFirstPoint = useCallback((point: { x: number; y: number }, firstPoint: { x: number; y: number }, threshold: number = 10): boolean => {
-    const dx = point.x - firstPoint.x;
-    const dy = point.y - firstPoint.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    return distance <= threshold / scale; // Adjust threshold by scale
+  const isNearFirstPoint = useCallback((point: { x: number; y: number }, firstPoint: { x: number; y: number }, threshold: number = CANVAS.CLOSE_POLYGON_THRESHOLD): boolean => {
+    return isPointNear(point, firstPoint, threshold / scale); // Adjust threshold by scale
   }, [scale]);
+
+  // Get measurements that intersect with selection rectangle
+  const getMeasurementsInRect = useCallback((rect: { x: number; y: number; width: number; height: number }, imageX: number, imageY: number): string[] => {
+    // Normalize rectangle (handle negative width/height)
+    // NOTE: rect is in image coordinates (relative to image origin)
+    // Measurements are also stored in image coordinates
+    // We should compare them in the same coordinate system (image coordinates)
+    const normalizedRect = {
+      x: Math.min(rect.x, rect.x + rect.width),
+      y: Math.min(rect.y, rect.y + rect.height),
+      width: Math.abs(rect.width),
+      height: Math.abs(rect.height),
+    };
+    
+    const pageMeasurements = measurements.filter(m => !m.pageNumber || m.pageNumber === activePage);
+    const selectedIds: string[] = [];
+    
+    for (const measurement of pageMeasurements) {
+      let isSelected = false;
+      
+      if (measurement.type === 'length' && measurement.data.points) {
+        // Measurements are stored in image coordinates, rect is also in image coordinates
+        // Compare them in the same coordinate system (don't add imageX/imageY)
+        const points = measurement.data.points.map((p: { x: number; y: number }) => ({
+          x: p.x,  // Keep in image coordinates
+          y: p.y,  // Keep in image coordinates
+        }));
+        // Check if any endpoint is inside or line intersects
+        for (let i = 0; i < points.length - 1; i++) {
+          if (pointInRect(points[i], normalizedRect) || pointInRect(points[i + 1], normalizedRect) || 
+              lineIntersectsRect(points[i], points[i + 1], normalizedRect)) {
+            isSelected = true;
+            break;
+          }
+        }
+      } else if (measurement.type === 'area' && measurement.data.points) {
+        // Measurements are stored in image coordinates, rect is also in image coordinates
+        // Compare them in the same coordinate system (don't add imageX/imageY)
+        const points = measurement.data.points.map((p: { x: number; y: number }) => ({
+          x: p.x,  // Keep in image coordinates
+          y: p.y,  // Keep in image coordinates
+        }));
+        
+        // Check if any vertex is inside
+        for (const p of points) {
+          if (pointInRect(p, normalizedRect)) {
+            isSelected = true;
+            break;
+          }
+        }
+        
+        // Check if bounding box intersects
+        if (!isSelected) {
+          const bbox = getBoundingBox(points);
+          if (rectsIntersect(bbox, normalizedRect)) {
+            isSelected = true;
+          }
+        }
+      } else if (measurement.type === 'count' && measurement.data.point) {
+        const p = measurement.data.point;
+        // Measurements are stored in image coordinates, rect is also in image coordinates
+        // Compare them in the same coordinate system (don't add imageX/imageY)
+        const bbox = {
+          x: p.x - CANVAS.COUNT_SIZE / 2 / scale,  // Keep in image coordinates
+          y: p.y - CANVAS.COUNT_SIZE / 2 / scale,  // Keep in image coordinates
+          width: CANVAS.COUNT_SIZE / scale,
+          height: CANVAS.COUNT_SIZE / scale,
+        };
+        if (rectsIntersect(bbox, normalizedRect)) {
+          isSelected = true;
+        }
+      }
+      
+      if (isSelected) {
+        selectedIds.push(measurement.id);
+      }
+    }
+    
+    return selectedIds;
+  }, [measurements, activePage, scale]);
 
   // Handle click to add point (only if not dragging)
   const handleClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    // Don't handle clicks if it was a right-click (context menu should handle it)
+    if (isRightClickRef.current || e.evt.button === 2) {
+      isRightClickRef.current = false;
+      return;
+    }
+    
+    // Handle select mode
+    if (activeTool === 'select') {
+      // If we're currently selecting AND the rectangle is visible (drag occurred), ignore click
+      // The selection will be finalized in handleMouseUp
+      // BUT: If rectangle is NOT visible (no drag occurred), allow click to proceed to clear selection
+      const wasActuallyDragging = selectionRectRef.current?.visible() || false;
+      if ((isSelecting || selectionRect) && wasActuallyDragging) {
+        return;
+      }
+      // If we have stale state from a click without drag, clear it now
+      if ((isSelecting || selectionRect) && !wasActuallyDragging) {
+        setIsSelecting(false);
+        setSelectionStart(null);
+        setSelectionRect(null);
+        if (selectionRectRef.current) {
+          selectionRectRef.current.visible(false);
+        }
+      }
+      
+      // If we just completed a selection rectangle, don't clear it
+      if (justCompletedSelectionRef.current) {
+        return;
+      }
+      
+      // Check if click was on a measurement shape
+      const { isMeasurement: isMeasurementShape, measurementId } = isMeasurementNode(e.target);
+      
+      if (isMeasurementShape && measurementId) {
+        // Update selection based on modifier keys
+        const newSelection = updateSelectionWithModifiers(
+          selectedMeasurementIds,
+          measurementId,
+          e.evt.shiftKey,
+          e.evt.ctrlKey,
+          e.evt.metaKey
+        );
+        onMeasurementSelect(newSelection);
+      } else {
+        // Click on empty space - clear selection unless Shift is held
+        if (!e.evt.shiftKey) {
+          onMeasurementSelect(new Set());
+        }
+      }
+      return;
+    }
+
     // This is now a fallback - main point addition happens in handleMouseUp
     // Only handle count and calibrate here since they don't need drag detection
 
     // Allow clicks on background image, stage, and layer, but not on measurement shapes
     // Check if target or any parent is a measurement Group
-    let node: any = e.target;
-    let isMeasurementShape = false;
-    let targetType = '';
-    const targetName = node?.name?.();
-    const targetClassName = node?.className || '';
-    while (node) {
-      const nodeName = node.name?.();
-      const nodeType = node.getType?.();
-      if (nodeName === 'measurement') {
-        isMeasurementShape = true;
-        targetType = nodeType || 'unknown';
-        break;
-      }
-      node = node.getParent?.();
-    }
+    const { isMeasurement: isMeasurementShape } = isMeasurementNode(e.target);
+    const clickedNode = e.target;
+    const targetClassName = clickedNode?.className || '';
     
     // Block measurement shapes, allow everything else (Stage, Layer, background image)
     // BUT: Allow clicks on measurement endpoints when starting a new measurement
@@ -275,17 +498,12 @@ export default function Viewer({
       // Use the circle's position as the starting point
       const stage = e.target.getStage();
       if (stage && clickedNode && isEndpointCircle) {
-        // Get circle position in stage coordinates
+        // Get circle position in stage coordinates, convert to image coordinates
         const circleX = clickedNode.x();
         const circleY = clickedNode.y();
-        // Convert to image coordinates
-        const scaledWidth = imageSize.width * scale;
-        const scaledHeight = imageSize.height * scale;
-        const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-        const imageY = (stageSize.height - scaledHeight) / 2 / scale;
         const imagePos = {
-          x: circleX - imageX,
-          y: circleY - imageY,
+          x: circleX - imageOffset.x,
+          y: circleY - imageOffset.y,
         };
         if (activeTool === 'length') {
           setCurrentPoints([imagePos]);
@@ -305,6 +523,11 @@ export default function Viewer({
       return;
     }
 
+    // Prevent drawing in select mode
+    if (activeTool === 'select') {
+      return;
+    }
+
     // Prevent starting a NEW measurement if one is already active for a DIFFERENT tool
     // But allow continuing the same measurement type
     if (activeMeasurementType && activeTool !== activeMeasurementType && activeTool !== 'count' && activeTool !== 'calibrate') {
@@ -318,20 +541,7 @@ export default function Viewer({
     if (!pointer) return;
 
     // Convert to image coordinates
-    // getPointerPosition() returns coordinates in Stage container (DOM pixels)
-    // Stage has scale and position (pan) applied, so we need to convert to stage coordinates first
-    // Then account for image offset within stage coordinates
-    const scaledWidth = imageSize.width * scale;
-    const scaledHeight = imageSize.height * scale;
-    const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-    const imageY = (stageSize.height - scaledHeight) / 2 / scale;
-    // Convert pointer from DOM pixels to stage coordinates (accounting for pan and zoom)
-    const stageX = (pointer.x - position.x) / scale;
-    const stageY = (pointer.y - position.y) / scale;
-    const imagePos = {
-      x: stageX - imageX,
-      y: stageY - imageY,
-    };
+    const imagePos = getImageCoordinatesFromPointer(pointer.x, pointer.y);
 
     if (activeTool === 'calibrate') {
       setCalibrationPoints((prev) => {
@@ -361,48 +571,13 @@ export default function Viewer({
       }
       // Point addition for existing measurements now happens in handleMouseUp
     } else if (activeTool === 'count') {
-      // Check available categories for "door" or "window" names
-      const allCategories = getAllCategories();
-      const doorCategory = allCategories.find(c => 
-        c.name.toLowerCase().includes('door')
-      );
-      const windowCategory = allCategories.find(c => 
-        c.name.toLowerCase().includes('window')
-      );
+      // Use defaultCategory if provided, otherwise no category (undefined)
+      const category: string | undefined = defaultCategory || undefined;
       
-      // Also check existing measurements for door/window patterns
+      // Default name
       const existingCounts = measurements.filter(m => m.type === 'count');
-      const existingDoors = existingCounts.filter(m => 
-        (m.category || '').toLowerCase().includes('door') || 
-        m.name.toLowerCase().includes('door')
-      );
-      const existingWindows = existingCounts.filter(m => 
-        (m.category || '').toLowerCase().includes('window') || 
-        m.name.toLowerCase().includes('window')
-      );
-      
-      // Infer category: prefer defaultCategory, then category name if it exists, otherwise use pattern from measurements
-      let inferredCategory: string | undefined = defaultCategory || undefined;
-      if (!inferredCategory) {
-        if (doorCategory) {
-          inferredCategory = doorCategory.name;
-        } else if (windowCategory) {
-          inferredCategory = windowCategory.name;
-        } else if (existingDoors.length > existingWindows.length) {
-          inferredCategory = 'Door';
-        } else if (existingWindows.length > existingDoors.length) {
-          inferredCategory = 'Window';
-        }
-      }
-      
-      // Default name based on inferred category
       const countNumber = existingCounts.length + 1;
-      const defaultName = inferredCategory 
-        ? `${inferredCategory} ${existingCounts.filter(m => 
-            (m.category || '').toLowerCase() === inferredCategory?.toLowerCase() ||
-            m.name.toLowerCase().startsWith(inferredCategory.toLowerCase())
-          ).length + 1}`
-        : `Count ${countNumber}`;
+      const defaultName = `Count ${countNumber}`;
       
       const measurement: Measurement = {
         id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
@@ -410,14 +585,47 @@ export default function Viewer({
         type: 'count',
         value: 1,
         units: 'ft',
-        color: defaultColor || getToolColor('count'),
-        category: inferredCategory,
+        color: getToolColor('count'),
+        category: category,
         data: { point: imagePos },
         pageNumber: activePage,
       };
       onMeasurementAdd(measurement);
     }
-  }, [activeTool, file, position, scale, measurements, activePage, onMeasurementAdd, imageSize, stageSize, activeMeasurementType, currentPoints, isNearFirstPoint, finishMeasurement, isDragging]);
+  }, [activeTool, file, imageOffset, getImageCoordinatesFromPointer, measurements, activePage, onMeasurementAdd, activeMeasurementType, currentPoints, isNearFirstPoint, finishMeasurement, isDragging, isSelecting, selectedMeasurementIds, onMeasurementSelect, justCompletedSelectionRef, selectionRect, defaultCategory]);
+
+  // Handle right-click to show context menu
+  const handleContextMenu = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    // Only show context menu if measurements are selected
+    if (selectedMeasurementIds.size === 0 || !onGroup || !onUngroup) {
+      return;
+    }
+
+    e.evt.preventDefault();
+    e.evt.stopPropagation();
+
+    // Get the pointer position in viewport coordinates
+    const pointer = e.target.getStage()?.getPointerPosition();
+    if (!pointer) return;
+
+    // Get the container's bounding rect to convert stage coordinates to viewport coordinates
+    const container = containerRef.current;
+    if (!container) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const viewportX = containerRect.left + pointer.x;
+    const viewportY = containerRect.top + pointer.y;
+
+    setContextMenu({ x: viewportX, y: viewportY });
+  }, [selectedMeasurementIds, onGroup, onUngroup]);
+
+  // Throttled preview point update to reduce re-renders
+  const updatePreviewPointThrottled = useMemo(
+    () => throttleRAF((imagePos: { x: number; y: number }) => {
+      setPreviewPoint(imagePos);
+    }),
+    []
+  );
 
   const handleMouseMove = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     const stage = e.target.getStage();
@@ -425,62 +633,188 @@ export default function Viewer({
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
 
-    // If mouse is down, check if we're dragging (moved more than threshold)
-    // Don't start dragging if we have an active length or area measurement
-    if (mouseDownPos && !isDragging && (!activeMeasurementType || activeMeasurementType === null)) {
-      const dx = pointer.x - mouseDownPos.x;
-      const dy = pointer.y - mouseDownPos.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      // If moved more than 10 pixels, consider it a drag (increased threshold to avoid interfering with clicks)
-      if (distance > 10) {
-        // Only start dragging if clicking on stage and no active measurement tool
-        if (e.target === e.target.getStage() && (!activeTool || activeTool === 'count' || activeTool === 'calibrate')) {
-          setIsDragging(true);
-          setDragStart({
-            x: pointer.x - position.x,
-            y: pointer.y - position.y,
-          });
-        }
-      }
-    }
-
-    if (isDragging) {
+    // Handle pan tool - allow dragging when pan is active (no throttling needed for smooth pan)
+    if (activeTool === 'pan' && isDragging) {
       setPosition({
         x: pointer.x - dragStart.x,
         y: pointer.y - dragStart.y,
       });
-    } else if (activeMeasurementType && (activeMeasurementType === 'length' || activeMeasurementType === 'area')) {
-      // Update preview point for active measurement
-      const scaledWidth = imageSize.width * scale;
-      const scaledHeight = imageSize.height * scale;
-      const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-      const imageY = (stageSize.height - scaledHeight) / 2 / scale;
-      // Convert pointer from DOM pixels to stage coordinates (accounting for pan and zoom)
-      const stageX = (pointer.x - position.x) / scale;
-      const stageY = (pointer.y - position.y) / scale;
-      const imagePos = {
-        x: stageX - imageX,
-        y: stageY - imageY,
+      // Prevent default to avoid text selection and other browser behaviors during pan
+      e.evt.preventDefault();
+      return;
+    }
+
+    // Handle selection rectangle update in select mode
+    if (activeTool === 'select' && isSelecting && selectionStart) {
+      const imagePos = getImageCoordinatesFromPointer(pointer.x, pointer.y);
+      
+      // Calculate distance from selection start to determine if drag threshold is exceeded
+      const dx = imagePos.x - selectionStart.x;
+      const dy = imagePos.y - selectionStart.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      const rect = {
+        x: Math.min(selectionStart.x, imagePos.x),
+        y: Math.min(selectionStart.y, imagePos.y),
+        width: Math.abs(imagePos.x - selectionStart.x),
+        height: Math.abs(imagePos.y - selectionStart.y),
       };
-      setPreviewPoint(imagePos);
+      
+      // Only show rectangle if drag threshold is exceeded
+      const shouldShow = distance > CANVAS.DRAG_THRESHOLD;
+      
+      // Update selection rectangle directly via Konva ref to avoid React re-renders during drag
+      // This prevents expensive measurement re-renders while dragging
+      // The rect should already exist from handleStageMouseDown, but if ref isn't set yet,
+      // we'll update state once (acceptable - only happens on very first mousemove)
+      if (selectionRectRef.current) {
+        // Direct Konva update - no React re-render!
+        selectionRectRef.current.x(rect.x + imageOffset.x);
+        selectionRectRef.current.y(rect.y + imageOffset.y);
+        selectionRectRef.current.width(rect.width);
+        selectionRectRef.current.height(rect.height);
+        // CRITICAL: Only show rectangle if drag threshold is exceeded
+        selectionRectRef.current.visible(shouldShow);
+        // Force redraw of the layer without React re-render
+        selectionRectRef.current.getLayer()?.batchDraw();
+      } else {
+        // Fallback: ref not set yet (shouldn't happen, but safe fallback)
+        // This will cause one re-render, but only on the very first mousemove
+        setSelectionRect(rect);
+      }
+      
+      // Mark that we're dragging selection (used for potential future optimizations)
+      isDraggingSelectionRef.current = true;
+      
+      // Store rect for use in mouseup (hit-testing happens only on mouseup)
+      pendingSelectionRect.current = rect;
+      return;
+    }
+
+    // ONLY allow dragging to start for pan tool - strict check
+    // No other tool may trigger panning
+    if (activeTool === 'pan' && mouseDownPos && !isDragging) {
+      const dx = pointer.x - mouseDownPos.x;
+      const dy = pointer.y - mouseDownPos.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      // If moved more than threshold, consider it a drag (increased threshold to avoid interfering with clicks)
+      if (distance > CANVAS.PAN_DRAG_THRESHOLD) {
+        setIsDragging(true);
+        setDragStart({
+          x: pointer.x - position.x,
+          y: pointer.y - position.y,
+        });
+      }
+    }
+
+    // Pan tool dragging is already handled above (line 716-722)
+    // No other tools should trigger panning - removed legacy fallback panning
+    if (activeMeasurementType && (activeMeasurementType === 'length' || activeMeasurementType === 'area')) {
+      // Update preview point for active measurement (throttled to reduce re-renders)
+      const imagePos = getImageCoordinatesFromPointer(pointer.x, pointer.y);
+      updatePreviewPointThrottled(imagePos);
     } else {
       setPreviewPoint(null);
     }
-  }, [isDragging, activeMeasurementType, position, scale, dragStart, imageSize, stageSize, mouseDownPos, activeTool]);
+  }, [isDragging, activeMeasurementType, position, dragStart, mouseDownPos, activeTool, isSelecting, selectionStart, getImageCoordinatesFromPointer, imageOffset, updatePreviewPointThrottled]);
 
   const handleMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
-    // For length and area tools, always allow adding points even if there was slight movement
-    // Only prevent if we were actually dragging (panning the stage)
-    const wasActuallyDragging = isDragging && (!activeMeasurementType || activeMeasurementType === null);
+    // Don't handle mouseup if it was a right-click (context menu should handle it)
+    if (isRightClickRef.current || e.evt.button === 2) {
+      // Reset selection state if we were in the middle of a selection rectangle
+      if (isSelecting) {
+        setIsSelecting(false);
+        setSelectionStart(null);
+        setSelectionRect(null);
+        isDraggingSelectionRef.current = false;
+        // Cancel any pending RAF updates
+        if (rafRef.current) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+        pendingSelectionRect.current = null;
+        // Hide selection rectangle - explicit ref control
+        if (selectionRectRef.current) {
+          selectionRectRef.current.visible(false);
+          selectionRectRef.current.getLayer()?.batchDraw();
+        }
+      }
+      isRightClickRef.current = false;
+      setMouseDownPos(null);
+      return;
+    }
     
-    if (wasActuallyDragging) {
+    // Handle selection rectangle completion in select mode
+    if (activeTool === 'select' && isSelecting && selectionStart) {
+      // Use pendingSelectionRect if available (from drag), otherwise use selectionRect state
+      const finalRect = pendingSelectionRect.current || selectionRect;
+      
+      // Only process selection if rectangle was actually shown (drag threshold exceeded)
+      // If user just clicked without dragging, clear everything and return
+      const wasActuallyDragging = selectionRectRef.current?.visible() || false;
+      
+      if (finalRect && wasActuallyDragging) {
+        // Get measurements in selection rectangle (ONLY compute intersections on mouseup)
+        const selectedIds = getMeasurementsInRect(finalRect, imageOffset.x, imageOffset.y);
+        
+        // Update selection based on Shift key
+        const newSelection = new Set(selectedMeasurementIds);
+        if (e.evt.shiftKey) {
+          // Add to existing selection
+          selectedIds.forEach(id => newSelection.add(id));
+        } else {
+          // Replace selection
+          newSelection.clear();
+          selectedIds.forEach(id => newSelection.add(id));
+        }
+        onMeasurementSelect(newSelection);
+        
+        // Mark that we just completed a selection to prevent handleClick from clearing it
+        justCompletedSelectionRef.current = true;
+        // Reset the flag after a short delay to allow handleClick to check it
+        setTimeout(() => {
+          justCompletedSelectionRef.current = false;
+        }, 100);
+      } else {
+        // User clicked without dragging (threshold not exceeded) - just clear everything
+      }
+      
+      // Reset selection state (always, whether drag happened or not)
+      setIsSelecting(false);
+      setSelectionStart(null);
+      setSelectionRect(null);
+      setMouseDownPos(null);
+      isDraggingSelectionRef.current = false;
+      // Cancel any pending RAF updates
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      pendingSelectionRect.current = null;
+      // Hide selection rectangle
+      // CRITICAL: This explicit ref update is the ONLY way visibility should be cleared
+      if (selectionRectRef.current) {
+        selectionRectRef.current.visible(false);
+        selectionRectRef.current.getLayer()?.batchDraw();
+      }
+      // Prevent click event from firing
+      e.evt.preventDefault();
+      e.evt.stopPropagation();
+      return;
+    }
+    
+    // For length and area tools, always allow adding points even if there was slight movement
+    // Only prevent if we were actually panning (dragging with pan tool active)
+    const wasActuallyPanning = activeTool === 'pan' && isDragging && (!activeMeasurementType || activeMeasurementType === null);
+    
+    if (wasActuallyPanning) {
       setIsDragging(false);
       setMouseDownPos(null);
       return;
     }
     
-    // Reset dragging state if it was set
-    if (isDragging) {
+    // Reset dragging state if it was set (only pan tool should set this)
+    if (isDragging && activeTool === 'pan') {
       setIsDragging(false);
     }
 
@@ -490,22 +824,18 @@ export default function Viewer({
       return;
     }
     
+    // Prevent drawing in select mode
+    // Also prevent clearing selections on empty space clicks in select mode
+    if (activeTool === 'select') {
+      setMouseDownPos(null);
+      return;
+    }
+    
     // If no active measurement exists, start a new one (first click)
     if (!activeMeasurementType && (activeTool === 'length' || activeTool === 'area')) {
       // Check if click was on a measurement shape
-      let node: any = e.target;
-      let isMeasurementShape = false;
-      let clickedNodeType = '';
+      const { isMeasurement: isMeasurementShape } = isMeasurementNode(e.target);
       const clickedNode = e.target;
-      clickedNodeType = clickedNode?.getType?.();
-      while (node) {
-        const nodeName = node.name?.();
-        if (nodeName === 'measurement') {
-          isMeasurementShape = true;
-          break;
-        }
-        node = node.getParent?.();
-      }
       
       // Allow clicks on endpoint circles (Circles) when starting a new measurement
       // Note: getType() returns "Shape" for Circle, so we check className instead
@@ -519,17 +849,12 @@ export default function Viewer({
       if (isMeasurementShape && isEndpointCircle) {
         const stage = e.target.getStage();
         if (stage && clickedNode) {
-          // Get circle position in stage coordinates
+          // Get circle position in stage coordinates, convert to image coordinates
           const circleX = clickedNode.x();
           const circleY = clickedNode.y();
-          // Convert to image coordinates
-          const scaledWidth = imageSize.width * scale;
-          const scaledHeight = imageSize.height * scale;
-          const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-          const imageY = (stageSize.height - scaledHeight) / 2 / scale;
           const imagePos = {
-            x: circleX - imageX,
-            y: circleY - imageY,
+            x: circleX - imageOffset.x,
+            y: circleY - imageOffset.y,
           };
           
           if (activeTool === 'length') {
@@ -559,17 +884,7 @@ export default function Viewer({
       }
 
       // Convert to image coordinates
-      const scaledWidth = imageSize.width * scale;
-      const scaledHeight = imageSize.height * scale;
-      const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-      const imageY = (stageSize.height - scaledHeight) / 2 / scale;
-      // Convert pointer from DOM pixels to stage coordinates (accounting for pan and zoom)
-      const stageX = (pointer.x - position.x) / scale;
-      const stageY = (pointer.y - position.y) / scale;
-      const imagePos = {
-        x: stageX - imageX,
-        y: stageY - imageY,
-      };
+      const imagePos = getImageCoordinatesFromPointer(pointer.x, pointer.y);
 
       if (activeTool === 'length') {
         setCurrentPoints([imagePos]);
@@ -591,20 +906,10 @@ export default function Viewer({
     }
 
     // Check if click was on a measurement shape
-    let node: any = e.target;
-    let isMeasurementShape = false;
+    const { isMeasurement: isMeasurementShape } = isMeasurementNode(e.target);
     const clickedNode = e.target;
-    const clickedNodeType = clickedNode?.getType?.();
     const clickedNodeClassName = clickedNode?.className || '';
     const isEndpointCircle = clickedNodeClassName === 'Circle';
-    while (node) {
-      const nodeName = node.name?.();
-      if (nodeName === 'measurement') {
-        isMeasurementShape = true;
-        break;
-      }
-      node = node.getParent?.();
-    }
     
     // When adding points to existing measurement, allow endpoint circles but block other measurement shapes
     if (isMeasurementShape && !isEndpointCircle) {
@@ -617,17 +922,12 @@ export default function Viewer({
     if (isMeasurementShape && isEndpointCircle) {
       const stage = e.target.getStage();
       if (stage && clickedNode) {
-        // Get circle position in stage coordinates
+        // Get circle position in stage coordinates, convert to image coordinates
         const circleX = clickedNode.x();
         const circleY = clickedNode.y();
-        // Convert to image coordinates
-        const scaledWidth = imageSize.width * scale;
-        const scaledHeight = imageSize.height * scale;
-        const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-        const imageY = (stageSize.height - scaledHeight) / 2 / scale;
         imagePos = {
-          x: circleX - imageX,
-          y: circleY - imageY,
+          x: circleX - imageOffset.x,
+          y: circleY - imageOffset.y,
         };
       } else {
         setMouseDownPos(null);
@@ -647,17 +947,7 @@ export default function Viewer({
       }
 
       // Convert to image coordinates
-      const scaledWidth = imageSize.width * scale;
-      const scaledHeight = imageSize.height * scale;
-      const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-      const imageY = (stageSize.height - scaledHeight) / 2 / scale;
-      // Convert pointer from DOM pixels to stage coordinates (accounting for pan and zoom)
-      const stageX = (pointer.x - position.x) / scale;
-      const stageY = (pointer.y - position.y) / scale;
-      imagePos = {
-        x: stageX - imageX,
-        y: stageY - imageY,
-      };
+      imagePos = getImageCoordinatesFromPointer(pointer.x, pointer.y);
     }
 
     if (activeTool === 'length' && activeMeasurementType === 'length') {
@@ -673,7 +963,7 @@ export default function Viewer({
           type: 'length',
           value,
           units: calibration?.units || 'ft',
-          color: defaultColor || getToolColor('length'),
+          color: getToolColor('length'),
           category: defaultCategory || undefined,
           data: { points: newPoints },
           pageNumber: activePage,
@@ -698,7 +988,7 @@ export default function Viewer({
 
     // Reset mouse down position
     setMouseDownPos(null);
-  }, [isDragging, activeTool, file, activeMeasurementType, currentPoints, scale, position, imageSize, stageSize, isNearFirstPoint, finishMeasurement, calibration, measurements, activePage, onMeasurementAdd]);
+  }, [isDragging, activeTool, file, activeMeasurementType, currentPoints, imageOffset, getImageCoordinatesFromPointer, isNearFirstPoint, finishMeasurement, calibration, measurements, activePage, onMeasurementAdd, isSelecting, selectionRect, selectionStart, getMeasurementsInRect, selectedMeasurementIds, onMeasurementSelect]);
 
   // Double-click handler removed - length finishes automatically after 2 points,
   // area closes when clicking near the first point
@@ -706,12 +996,39 @@ export default function Viewer({
   // Handle keyboard events
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && activeMeasurementType) {
+      // Esc: Clear selection or cancel measurement
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (activeMeasurementType) {
+          cancelMeasurement();
+        } else if (selectedMeasurementIds.size > 0) {
+          onMeasurementSelect(new Set());
+        }
+      }
+      // Ctrl/Cmd+A: Select all measurements on current page
+      else if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        if (activeTool === 'select') {
+          const pageMeasurements = measurements.filter(m => !m.pageNumber || m.pageNumber === activePage);
+          const allIds = new Set(pageMeasurements.map(m => m.id));
+          onMeasurementSelect(allIds);
+        }
+      }
+      // Enter: Finish active measurement
+      else if (e.key === 'Enter' && activeMeasurementType) {
         e.preventDefault();
         finishMeasurement();
-      } else if (e.key === 'Escape' && activeMeasurementType) {
+      }
+      // Delete: Delete selected measurements (Backspace disabled to prevent accidental deletion)
+      // Also disabled when dialog is open to prevent accidental deletion
+      else if (e.key === 'Delete' && selectedMeasurementIds.size > 0 && onMeasurementDelete && !isDialogOpen) {
         e.preventDefault();
-        cancelMeasurement();
+        // Only delete if not currently drawing a measurement
+        if (!activeMeasurementType) {
+          onMeasurementDelete(selectedMeasurementIds);
+          // Clear selection after deletion
+          onMeasurementSelect(new Set());
+        }
       }
     };
 
@@ -719,53 +1036,113 @@ export default function Viewer({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [activeMeasurementType, finishMeasurement, cancelMeasurement]);
+  }, [activeMeasurementType, finishMeasurement, cancelMeasurement, selectedMeasurementIds, onMeasurementSelect, activeTool, measurements, activePage, onMeasurementDelete, isDialogOpen]);
 
   // Reset active measurement when tool changes
   useEffect(() => {
-    if (activeTool !== activeMeasurementType && activeTool !== 'calibrate' && activeTool !== 'count') {
+    // Cancel measurement drafts when tool changes away from the measurement tool
+    if (activeTool !== activeMeasurementType && activeTool !== 'calibrate' && activeTool !== 'count' && activeTool !== 'select' && activeTool !== 'pan') {
       cancelMeasurement();
     }
-  }, [activeTool, activeMeasurementType, cancelMeasurement]);
+    
+    // Clear calibration draft when tool changes away from calibrate
+    if (activeTool !== 'calibrate' && calibrationPoints.length > 0) {
+      setCalibrationPoints([]);
+    }
+    
+    // Clear selection rectangle when leaving select mode
+    if (activeTool !== 'select') {
+      setIsSelecting(false);
+      setSelectionStart(null);
+      setSelectionRect(null);
+      isDraggingSelectionRef.current = false;
+      // Cancel any pending RAF updates
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      pendingSelectionRect.current = null;
+      // Hide selection rectangle - explicit ref control
+      if (selectionRectRef.current) {
+        selectionRectRef.current.visible(false);
+        selectionRectRef.current.getLayer()?.batchDraw();
+      }
+    }
+    
+    // Clear dragging state when pan tool is deactivated
+    if (activeTool !== 'pan' && isDragging) {
+      setIsDragging(false);
+      setMouseDownPos(null);
+    }
+  }, [activeTool, activeMeasurementType, cancelMeasurement, isDragging, calibrationPoints.length]);
 
   const handleStageMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    // Don't start selection rectangle or other actions on right-click
+    if (e.evt.button === 2 || isRightClickRef.current) {
+      return;
+    }
+    
     const stage = e.target.getStage();
     if (!stage) return;
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
 
+    // Handle select mode - start selection rectangle
+    if (activeTool === 'select') {
+      // Check if click was on a measurement shape
+      const { isMeasurement: isMeasurementShape } = isMeasurementNode(e.target);
+      
+      // If clicking on empty space, start selection rectangle
+      if (!isMeasurementShape && e.target === e.target.getStage()) {
+        const imagePos = getImageCoordinatesFromPointer(pointer.x, pointer.y);
+        
+        setIsSelecting(true);
+        setSelectionStart(imagePos);
+        setSelectionRect({ x: imagePos.x, y: imagePos.y, width: 0, height: 0 });
+        isDraggingSelectionRef.current = false; // Will be set to true on first mousemove after threshold
+        pendingSelectionRect.current = null;
+        // CRITICAL: Do NOT show rectangle on mousedown - only show after drag threshold is exceeded
+        // This prevents ghost rectangles on simple clicks without dragging
+        // Rectangle will be shown in handleMouseMove only after movement > threshold
+        if (selectionRectRef.current) {
+          // Initialize position but keep hidden until drag threshold is exceeded
+          selectionRectRef.current.x(imagePos.x + imageOffset.x);
+          selectionRectRef.current.y(imagePos.y + imageOffset.y);
+          selectionRectRef.current.width(0);
+          selectionRectRef.current.height(0);
+          selectionRectRef.current.visible(false); // Start hidden - only show after drag threshold
+          selectionRectRef.current.getLayer()?.batchDraw();
+        }
+      }
+      // If clicking on measurement, selection is handled in handleClick
+      return;
+    }
+
     // Store mouse down position to detect drags
     setMouseDownPos(pointer);
 
     // Check if click was on a measurement shape
-    let node: any = e.target;
-    let isMeasurementShape = false;
-    while (node) {
-      const nodeName = node.name?.();
-      if (nodeName === 'measurement') {
-        isMeasurementShape = true;
-        break;
-      }
-      node = node.getParent?.();
-    }
+    const { isMeasurement: isMeasurementShape } = isMeasurementNode(e.target);
 
-    // If clicking on measurement shape or no active tool, allow dragging
-    // BUT: Don't allow dragging if we have an active length/area measurement
-    if ((isMeasurementShape || !activeTool || activeTool === 'count' || activeTool === 'calibrate') && !activeMeasurementType) {
-      if (e.target === e.target.getStage() || isMeasurementShape) {
-        setIsDragging(true);
-        setDragStart({
-          x: pointer.x - position.x,
-          y: pointer.y - position.y,
-        });
-      }
+    // Pan tool: ONLY allow dragging when pan is active
+    if (activeTool === 'pan') {
+      setIsDragging(true);
+      setDragStart({
+        x: pointer.x - position.x,
+        y: pointer.y - position.y,
+      });
+      // Prevent default to avoid text selection and other browser behaviors
+      e.evt.preventDefault();
+      e.evt.stopPropagation();
       return;
     }
     
+    // For all other tools, do NOT allow panning
+    // Tools like count, scale, length, area should handle their own drag behavior
     // If we have an active measurement, don't allow dragging - clicks should add points
     // The first click and subsequent clicks are now handled in handleMouseUp
     // This ensures complete clicks (mouseDown + mouseUp) rather than starting on mouseDown
-  }, [position, activeTool, activeMeasurementType, scale, imageSize, stageSize]);
+  }, [position, activeTool, activeMeasurementType, getImageCoordinatesFromPointer]);
 
   const handleCalibrationSubmit = () => {
     if (calibrationPoints.length === 2 && calibrationDistance) {
@@ -789,104 +1166,245 @@ export default function Viewer({
     }
   };
 
-  const renderMeasurements = () => {
-    const pageMeasurements = measurements.filter(m => !m.pageNumber || m.pageNumber === activePage);
-    // Calculate image offset for centering
-    const scaledWidth = imageSize.width * scale;
-    const scaledHeight = imageSize.height * scale;
-    const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-    const imageY = (stageSize.height - scaledHeight) / 2 / scale;
-    
-    return pageMeasurements.map((measurement) => {
-      const isSelected = selectedMeasurementId === measurement.id;
-      const baseStrokeWidth = measurement.type === 'length' 
-        ? (isSelected ? 7 : 5)
-        : (isSelected ? 3.5 : 2.5);
-      const strokeWidth = baseStrokeWidth / scale;
-      // Use category color if category exists, otherwise use stored color
-      const measurementColor = measurement.category ? getCategoryColor(measurement.category) : measurement.color;
+  // Create stable selection hash for memoization (only changes when selection actually changes)
+  const selectionHash = useMemo(() => {
+    // Use size + sorted IDs for stable comparison
+    const sortedIds = Array.from(selectedMeasurementIds).sort();
+    return `${selectedMeasurementIds.size}:${sortedIds.join(',')}`;
+  }, [selectedMeasurementIds]);
 
-      if (measurement.type === 'length' && measurement.data.points) {
-        const points = measurement.data.points.flatMap((p: { x: number; y: number }) => [p.x + imageX, p.y + imageY]);
-        const strokeColor = hexToRgba(measurementColor, 0.6);
-        return (
-          <Group key={measurement.id} name="measurement" onClick={() => onMeasurementSelect(measurement.id)}>
+  // Memoize individual measurement component to prevent unnecessary re-renders
+  // Component only re-renders when measurement data or isSelected prop changes
+  const MeasurementComponent = memo(({ 
+    measurement, 
+    isSelected,
+    scale,
+    imageOffset,
+    onMeasurementSelect,
+    selectedMeasurementIds,
+    handleContextMenu
+  }: { 
+    measurement: Measurement; 
+    isSelected: boolean;
+    scale: number;
+    imageOffset: { x: number; y: number };
+    onMeasurementSelect: (ids: Set<string>) => void;
+    selectedMeasurementIds: Set<string>;
+    handleContextMenu: (e: Konva.KonvaEventObject<MouseEvent>) => void;
+  }) => {
+    const baseStrokeWidth = measurement.type === 'length' 
+      ? (isSelected ? 7 : 5)
+      : (isSelected ? 3.5 : 2.5);
+    const strokeWidth = baseStrokeWidth / scale;
+    // Use category color if category exists, otherwise use stored color
+    const measurementColor = measurement.category ? getCategoryColor(measurement.category) : measurement.color;
+    // Highlight selected measurements with simple color change (no expensive shadow/blur)
+    const strokeColor = isSelected 
+      ? hexToRgba(measurementColor, MEASUREMENT.SELECTED_OPACITY)
+      : (measurement.type === 'length' ? hexToRgba(measurementColor, MEASUREMENT.LENGTH_OPACITY) : hexToRgba(measurementColor, MEASUREMENT.AREA_OPACITY));
+
+    const handleClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
+      // Don't handle if it was a right-click
+      if (isRightClickRef.current || e.evt.button === 2) {
+        isRightClickRef.current = false;
+        return;
+      }
+      e.cancelBubble = true;
+      const newSelection = updateSelectionWithModifiers(
+        selectedMeasurementIds,
+        measurement.id,
+        e.evt.shiftKey,
+        e.evt.ctrlKey,
+        e.evt.metaKey
+      );
+      onMeasurementSelect(newSelection);
+    };
+
+    const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
+      // Track right-click on mousedown
+      if (e.evt.button === 2) {
+        isRightClickRef.current = true;
+      }
+    };
+
+    const handleContextMenuEvent = (e: Konva.KonvaEventObject<MouseEvent>) => {
+      isRightClickRef.current = false; // Reset flag
+      e.evt.preventDefault();
+      e.evt.stopPropagation();
+      handleContextMenu(e);
+    };
+
+    if (measurement.type === 'length' && measurement.data.points) {
+      const points = measurement.data.points.flatMap((p: { x: number; y: number }) => [p.x + imageOffset.x, p.y + imageOffset.y]);
+      return (
+        <Group id={measurement.id} name="measurement" onMouseDown={handleMouseDown} onClick={handleClick} onContextMenu={handleContextMenuEvent}>
+          {/* Simple highlight for selected measurements - no expensive shadow/blur */}
+          {isSelected && (
             <Line
               points={points}
-              stroke={strokeColor}
-              strokeWidth={strokeWidth}
+              stroke={hexToRgba(measurementColor, 0.4)}
+              strokeWidth={strokeWidth * 1.8}
               tension={0}
               lineCap="round"
               lineJoin="round"
             />
-            {points.length >= 2 && (
-              <>
-                <Circle
-                  x={points[0]}
-                  y={points[1]}
-                  radius={4 / scale}
-                  fill={hexToRgba(measurementColor, 0.6)}
-                />
-                <Circle
-                  x={points[points.length - 2]}
-                  y={points[points.length - 1]}
-                  radius={4 / scale}
-                  fill={hexToRgba(measurementColor, 0.6)}
-                />
-              </>
-            )}
-          </Group>
-        );
-      } else if (measurement.type === 'area' && measurement.data.points) {
-        const points = measurement.data.points.flatMap((p: { x: number; y: number }) => [p.x + imageX, p.y + imageY]);
-        const fillColor = hexToRgba(measurementColor, 0.08);
-        const strokeColor = hexToRgba(measurementColor, 0.4);
-        return (
-          <Group key={measurement.id} name="measurement" onClick={() => onMeasurementSelect(measurement.id)}>
+          )}
+          <Line
+            points={points}
+            stroke={strokeColor}
+            strokeWidth={strokeWidth}
+            tension={0}
+            lineCap="round"
+            lineJoin="round"
+          />
+          {points.length >= 2 && (
+            <>
+              <Circle
+                x={points[0]}
+                y={points[1]}
+                radius={CANVAS.ENDPOINT_RADIUS / scale}
+                fill={hexToRgba(measurementColor, 0.6)}
+              />
+              <Circle
+                x={points[points.length - 2]}
+                y={points[points.length - 1]}
+                radius={4 / scale}
+                fill={hexToRgba(measurementColor, 0.6)}
+              />
+            </>
+          )}
+        </Group>
+      );
+    } else if (measurement.type === 'area' && measurement.data.points) {
+      const points = measurement.data.points.flatMap((p: { x: number; y: number }) => [p.x + imageOffset.x, p.y + imageOffset.y]);
+      const fillColor = hexToRgba(measurementColor, isSelected ? 0.15 : 0.08);
+      return (
+        <Group id={measurement.id} name="measurement" onMouseDown={handleMouseDown} onClick={handleClick} onContextMenu={handleContextMenuEvent}>
+          {/* Simple highlight for selected measurements - no expensive shadow/blur */}
+          {isSelected && (
             <Line
               points={[...points, points[0], points[1]]}
-              stroke={strokeColor}
-              strokeWidth={strokeWidth}
-              fill={fillColor}
+              stroke={hexToRgba(measurementColor, 0.4)}
+              strokeWidth={strokeWidth * 1.8}
+              fill={hexToRgba(measurementColor, 0.12)}
               closed
             />
-            {measurement.data.points.map((p: { x: number; y: number }, i: number) => (
-              <Circle
-                key={i}
-                x={p.x + imageX}
-                y={p.y + imageY}
-                radius={4 / scale}
-                fill={hexToRgba(measurementColor, 0.5)}
-              />
-            ))}
-          </Group>
-        );
-      } else if (measurement.type === 'count' && measurement.data.point) {
-        const p = measurement.data.point;
-        return (
-          <Group key={measurement.id} name="measurement" onClick={() => onMeasurementSelect(measurement.id)}>
+          )}
+          <Line
+            points={[...points, points[0], points[1]]}
+            stroke={strokeColor}
+            strokeWidth={strokeWidth}
+            fill={fillColor}
+            closed
+          />
+          {measurement.data.points.map((p: { x: number; y: number }, i: number) => (
             <Circle
-              x={p.x + imageX}
-              y={p.y + imageY}
-              radius={8 / scale}
+              key={i}
+              x={p.x + imageOffset.x}
+              y={p.y + imageOffset.y}
+              radius={CANVAS.ENDPOINT_RADIUS / scale}
+              fill={hexToRgba(measurementColor, 0.5)}
+            />
+          ))}
+        </Group>
+      );
+    } else if (measurement.type === 'count' && measurement.data.point) {
+      const p = measurement.data.point;
+      return (
+        <Group id={measurement.id} name="measurement" onMouseDown={handleMouseDown} onClick={handleClick} onContextMenu={handleContextMenuEvent}>
+          {/* Simple highlight for selected measurements - no expensive shadow/blur */}
+          {isSelected && (
+            <Circle
+              x={p.x + imageOffset.x}
+              y={p.y + imageOffset.y}
+              radius={10 / scale}
               stroke={hexToRgba(measurementColor, 0.5)}
-              strokeWidth={strokeWidth}
-              fill={hexToRgba(measurementColor, 0.15)}
+              strokeWidth={strokeWidth * 1.5}
+              fill={hexToRgba(measurementColor, 0.25)}
             />
-            <Text
-              x={p.x + imageX + 12 / scale}
-              y={p.y + imageY - 8 / scale}
-              text={measurement.name}
-              fontSize={12 / scale}
-              fill={hexToRgba(measurementColor, 0.6)}
-              fontStyle="bold"
-            />
-          </Group>
-        );
-      }
-      return null;
+          )}
+          <Circle
+            x={p.x + imageOffset.x}
+            y={p.y + imageOffset.y}
+            radius={8 / scale}
+            stroke={hexToRgba(measurementColor, isSelected ? 0.7 : 0.5)}
+            strokeWidth={strokeWidth}
+            fill={hexToRgba(measurementColor, isSelected ? 0.25 : 0.15)}
+          />
+          <Text
+            x={p.x + imageOffset.x + 12 / scale}
+            y={p.y + imageOffset.y - 8 / scale}
+            text={measurement.name}
+            fontSize={12 / scale}
+            fill={hexToRgba(measurementColor, 0.6)}
+            fontStyle="bold"
+          />
+        </Group>
+      );
+    }
+    return null;
+  }, (prevProps, nextProps) => {
+    // Custom comparison: return true if props are equal (skip re-render), false if different (re-render)
+    return (
+      prevProps.measurement.id === nextProps.measurement.id &&
+      JSON.stringify(prevProps.measurement.data) === JSON.stringify(nextProps.measurement.data) &&
+      prevProps.measurement.color === nextProps.measurement.color &&
+      prevProps.measurement.category === nextProps.measurement.category &&
+      prevProps.isSelected === nextProps.isSelected &&
+      prevProps.scale === nextProps.scale &&
+      prevProps.imageOffset.x === nextProps.imageOffset.x &&
+      prevProps.imageOffset.y === nextProps.imageOffset.y
+    );
+  });
+
+  // Memoize measurement rendering - only recalculate when measurements or selection actually change
+  const renderedMeasurements = useMemo(() => {
+    if (process.env.NODE_ENV === 'development') {
+      performance.mark('measurement-render-start');
+    }
+    
+    const pageMeasurements = measurements.filter(m => !m.pageNumber || m.pageNumber === activePage);
+    
+    const result = pageMeasurements.map((measurement) => {
+      const isSelected = selectedMeasurementIds.has(measurement.id);
+      return (
+        <MeasurementComponent 
+          key={measurement.id} 
+          measurement={measurement} 
+          isSelected={isSelected}
+          scale={scale}
+          imageOffset={imageOffset}
+          onMeasurementSelect={onMeasurementSelect}
+          selectedMeasurementIds={selectedMeasurementIds}
+          handleContextMenu={handleContextMenu}
+        />
+      );
     });
-  };
+    
+    if (process.env.NODE_ENV === 'development') {
+      performance.mark('measurement-render-end');
+      performance.measure('measurement-render', 'measurement-render-start', 'measurement-render-end');
+      const measure = performance.getEntriesByName('measurement-render')[0];
+      if (measure.duration > PERFORMANCE.FRAME_TIME_MS) { // Log if takes longer than one frame
+        console.log(`[Performance] Measurement render took ${measure.duration.toFixed(2)}ms for ${pageMeasurements.length} measurements, ${selectedMeasurementIds.size} selected`);
+      }
+      performance.clearMarks();
+      performance.clearMeasures();
+    }
+    
+    return result;
+  }, [
+    measurements, 
+    activePage, 
+    selectionHash, // Use stable hash instead of creating new string every render
+    scale,
+    imageOffset.x,
+    imageOffset.y,
+    onMeasurementSelect,
+    handleContextMenu
+  ]);
+  
+  const renderMeasurements = () => renderedMeasurements;
 
   // Update stage size when container resizes
   useEffect(() => {
@@ -934,6 +1452,63 @@ export default function Viewer({
     };
   }, []);
 
+  // Update ref when selections change and batch canvas updates
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'development') {
+      performance.mark('selection-update-start');
+    }
+    
+    selectedCountRef.current = selectedMeasurementIds.size;
+    // Clear context menu when selections are cleared (user clicked away)
+    if (selectedMeasurementIds.size === 0) {
+      setContextMenu(null);
+    }
+    // Batch canvas update after selection changes (single render instead of per-node)
+    if (layerRef.current) {
+      layerRef.current.batchDraw();
+    }
+    
+    if (process.env.NODE_ENV === 'development') {
+      performance.mark('selection-update-end');
+      performance.measure('selection-update', 'selection-update-start', 'selection-update-end');
+      const measure = performance.getEntriesByName('selection-update')[0];
+      if (measure.duration > 16) { // Log if takes longer than one frame
+        console.log(`[Performance] Selection update took ${measure.duration.toFixed(2)}ms for ${selectedMeasurementIds.size} selected items`);
+      }
+      performance.clearMarks();
+      performance.clearMeasures();
+    }
+  }, [selectedMeasurementIds]);
+
+  // Handle right-click context menu on container (catches all right-clicks including empty space)
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    
+    const handleContextMenu = (e: MouseEvent) => {
+      // Use ref to get current selection count (avoids stale closure)
+      const currentSelectedCount = selectedCountRef.current;
+      // Only handle if we have selections (use ref to avoid stale closure)
+      if (currentSelectedCount > 0 && onGroup && onUngroup) {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // Get the exact click position
+        const viewportX = e.clientX;
+        const viewportY = e.clientY;
+        
+        // Set the context menu at the click position
+        // This works for both empty space and measurements (measurement Group handlers also set it)
+        setContextMenu({ x: viewportX, y: viewportY });
+      }
+    };
+    
+    container.addEventListener('contextmenu', handleContextMenu);
+    return () => {
+      container.removeEventListener('contextmenu', handleContextMenu);
+    };
+  }, [onGroup, onUngroup]); // Removed selectedMeasurementIds from deps - use ref instead
+
   if (!file) {
     return (
       <div className="flex-1 flex items-center justify-center bg-gray-100">
@@ -977,7 +1552,7 @@ export default function Viewer({
       )}
 
       {/* Canvas Overlay - Must be on top to receive all events */}
-      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 10, pointerEvents: 'auto', width: '100%', height: '100%' }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 10, pointerEvents: 'auto', width: '100%', height: '100%' }} className="canvas-overlay">
         <Stage
           ref={stageRef}
           width={stageSize.width}
@@ -987,20 +1562,33 @@ export default function Viewer({
           x={position.x}
           y={position.y}
           onWheel={handleWheel}
-          onMouseDown={handleStageMouseDown}
+          onMouseDown={(e) => {
+            // Track right-click on Stage
+            if (e.evt.button === 2) {
+              isRightClickRef.current = true;
+            }
+            handleStageMouseDown(e);
+          }}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onClick={handleClick}
-          style={{ cursor: activeTool ? 'crosshair' : isDragging ? 'grabbing' : 'grab' }}
+          onClick={(e) => {
+            // Don't handle click if it was a right-click
+            if (isRightClickRef.current || e.evt.button === 2) {
+              isRightClickRef.current = false;
+              return;
+            }
+            handleClick(e);
+          }}
+          onContextMenu={(e) => {
+            isRightClickRef.current = false; // Reset flag
+            handleContextMenu(e);
+          }}
+          style={{ cursor: activeTool === 'pan' ? (isDragging ? 'grabbing' : 'grab') : activeTool ? 'crosshair' : 'default' }}
         >
-        <Layer listening={true} clipFunc={undefined}>
+        <Layer ref={layerRef} listening={true} clipFunc={undefined}>
           {/* Background image - show for both PDF and images in Konva for coordinate matching */}
           {backgroundImage && imageSize.width > 0 && (() => {
-            // Center the image within the Stage coordinate space
-            // Calculate in stage coordinates (after scale transform)
-            const scaledWidth = imageSize.width * scale;
-            const scaledHeight = imageSize.height * scale;
-            // Convert back to image coordinates (before scale transform)
+            // Background image uses stage coordinates (before scale), so calculate differently
             const imageX = (stageSize.width / scale - imageSize.width) / 2;
             const imageY = (stageSize.height / scale - imageSize.height) / 2;
             return (
@@ -1015,53 +1603,43 @@ export default function Viewer({
               />
             );
           })()}
-          {/* Calibration line preview */}
-          {calibrationPoints.length > 0 && (() => {
-            const scaledWidth = imageSize.width * scale;
-            const scaledHeight = imageSize.height * scale;
-            const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-            const imageY = (stageSize.height - scaledHeight) / 2 / scale;
-            return (
-              <>
-                {calibrationPoints.map((p, i) => (
-                  <Circle
-                    key={i}
-                    x={p.x + imageX}
-                    y={p.y + imageY}
-                    radius={6 / scale}
-                    fill="red"
-                    stroke="white"
-                    strokeWidth={2 / scale}
-                    opacity={0.7}
-                  />
-                ))}
-                {calibrationPoints.length === 2 && (
-                  <Line
-                    points={[
-                      calibrationPoints[0].x + imageX,
-                      calibrationPoints[0].y + imageY,
-                      calibrationPoints[1].x + imageX,
-                      calibrationPoints[1].y + imageY,
-                    ]}
-                    stroke="red"
-                    strokeWidth={2 / scale}
-                    dash={[5 / scale, 5 / scale]}
-                    opacity={0.7}
-                  />
-                )}
-              </>
-            );
-          })()}
+          {/* Calibration line preview - only show when calibrate tool is active */}
+          {activeTool === 'calibrate' && calibrationPoints.length > 0 && (
+            <>
+              {calibrationPoints.map((p, i) => (
+                <Circle
+                  key={i}
+                  x={p.x + imageOffset.x}
+                  y={p.y + imageOffset.y}
+                  radius={6 / scale}
+                  fill="red"
+                  stroke="white"
+                  strokeWidth={2 / scale}
+                  opacity={0.7}
+                />
+              ))}
+              {calibrationPoints.length === 2 && (
+                <Line
+                  points={[
+                    calibrationPoints[0].x + imageOffset.x,
+                    calibrationPoints[0].y + imageOffset.y,
+                    calibrationPoints[1].x + imageOffset.x,
+                    calibrationPoints[1].y + imageOffset.y,
+                  ]}
+                  stroke="red"
+                  strokeWidth={2 / scale}
+                  dash={[5 / scale, 5 / scale]}
+                  opacity={0.7}
+                />
+              )}
+            </>
+          )}
 
-          {/* Current drawing preview */}
-          {currentPoints.length > 0 && (() => {
-            const radius = scale > 0 ? 4 / scale : 4;
+          {/* Current drawing preview - only show when measurement tool is active */}
+          {activeMeasurementType && currentPoints.length > 0 && (() => {
+            const radius = scale > 0 ? CANVAS.ENDPOINT_RADIUS / scale : CANVAS.ENDPOINT_RADIUS;
             const strokeWidth = scale > 0 ? 2 / scale : 2;
             const dashSize = scale > 0 ? 5 / scale : 5;
-            const scaledWidth = imageSize.width * scale;
-            const scaledHeight = imageSize.height * scale;
-            const imageX = (stageSize.width - scaledWidth) / 2 / scale;
-            const imageY = (stageSize.height - scaledHeight) / 2 / scale;
             const allPoints = previewPoint ? [...currentPoints, previewPoint] : currentPoints;
             const previewColor = activeMeasurementType ? getToolColor(activeMeasurementType) : '#3B82F6';
             
@@ -1071,8 +1649,8 @@ export default function Viewer({
                   return (
                     <Circle
                       key={i}
-                      x={p.x + imageX}
-                      y={p.y + imageY}
+                      x={p.x + imageOffset.x}
+                      y={p.y + imageOffset.y}
                       radius={radius}
                       fill={previewColor}
                       stroke="white"
@@ -1084,8 +1662,8 @@ export default function Viewer({
                 })}
                 {previewPoint && (
                   <Circle
-                    x={previewPoint.x + imageX}
-                    y={previewPoint.y + imageY}
+                    x={previewPoint.x + imageOffset.x}
+                    y={previewPoint.y + imageOffset.y}
                     radius={radius}
                     fill={previewColor}
                     stroke="white"
@@ -1096,7 +1674,7 @@ export default function Viewer({
                 )}
                 {allPoints.length > 1 && (
                   <Line
-                    points={allPoints.flatMap(p => [p.x + imageX, p.y + imageY])}
+                    points={allPoints.flatMap(p => [p.x + imageOffset.x, p.y + imageOffset.y])}
                     stroke={previewColor}
                     strokeWidth={strokeWidth}
                     dash={[dashSize, dashSize]}
@@ -1112,8 +1690,8 @@ export default function Viewer({
                 {/* Show closing indicator for area tool */}
                 {activeMeasurementType === 'area' && currentPoints.length >= 3 && previewPoint && isNearFirstPoint(previewPoint, currentPoints[0]) && (
                   <Circle
-                    x={currentPoints[0].x + imageX}
-                    y={currentPoints[0].y + imageY}
+                    x={currentPoints[0].x + imageOffset.x}
+                    y={currentPoints[0].y + imageOffset.y}
                     radius={radius * 1.5}
                     fill={previewColor}
                     stroke="white"
@@ -1128,6 +1706,36 @@ export default function Viewer({
 
           {/* Saved measurements */}
           {renderMeasurements()}
+          
+          {/* Selection rectangle overlay - always render but control visibility via ref ONLY */}
+          {/* CRITICAL: Do NOT use visible={!!selectionRect} prop - it causes React to override ref visibility on re-render */}
+          {/* CRITICAL: Ref callback should ONLY set the ref, NOT control visibility - visibility is controlled explicitly via ref in handlers */}
+          <Rect
+            ref={(node) => {
+              // Only set the ref - do NOT control visibility here
+              // Visibility is controlled explicitly in handleStageMouseDown and handleMouseUp
+              // This prevents the callback from overriding explicit visibility control on re-renders
+              selectionRectRef.current = node;
+              // DO NOT set visibility here - it will override explicit ref control on re-renders
+              // Initial visibility is set to false, and handlers will show/hide explicitly
+              if (node && !node.visible() && selectionRect) {
+                // Only initialize if node is not visible and we have selectionRect (first mount case)
+                // But this should be rare - handlers will control visibility
+                node.visible(false); // Start hidden, handlers will show when needed
+              }
+            }}
+            x={selectionRect ? selectionRect.x + imageOffset.x : 0}
+            y={selectionRect ? selectionRect.y + imageOffset.y : 0}
+            width={selectionRect?.width || 0}
+            height={selectionRect?.height || 0}
+            stroke="#3B82F6"
+            strokeWidth={2 / scale}
+            dash={[5 / scale, 5 / scale]}
+            fill="rgba(59, 130, 246, 0.1)"
+            listening={false}
+            // REMOVED: visible={!!selectionRect} - this was causing React to override ref visibility on re-render
+            // Visibility is now controlled entirely via ref to prevent ghost rectangles
+          />
         </Layer>
       </Stage>
       </div>
@@ -1224,16 +1832,60 @@ export default function Viewer({
         </div>
       )}
 
-      {/* Scale indicator */}
-      <div className="absolute top-4 right-4 bg-black/80 backdrop-blur-md shadow-lg px-3 py-2 text-sm border border-white/10">
-        <div className="text-white">Zoom: {(scale * 100).toFixed(0)}%</div>
-        {calibration?.isCalibrated && (
-          <div className="text-xs text-green-400 mt-1 flex items-center gap-1">
-            <CheckCircle className="w-3 h-3" />
-            Calibrated
-          </div>
-        )}
+      {/* Scale indicator and Fit button */}
+      <div className="absolute top-4 right-4 flex items-center gap-2" style={{ zIndex: 50, pointerEvents: 'auto' }}>
+        {/* Fit to View button */}
+        <button
+          onClick={handleFitToView}
+          className="bg-black/80 backdrop-blur-md shadow-lg px-3 py-2 text-sm border border-white/10 hover:bg-black/90 transition-colors flex items-center gap-2 group"
+          title="Fit page"
+          style={{ pointerEvents: 'auto' }}
+        >
+          <Maximize2 className="w-4 h-4 text-white/70 group-hover:text-white" strokeWidth={1.5} />
+          <span className="text-white/70 group-hover:text-white text-sm">Fit</span>
+        </button>
+        
+        {/* Zoom indicator */}
+        <div className="bg-black/80 backdrop-blur-md shadow-lg px-3 py-2 text-sm border border-white/10" style={{ pointerEvents: 'auto' }}>
+          <div className="text-white">Zoom: {(scale * 100).toFixed(0)}%</div>
+          {calibration?.isCalibrated && (
+            <div className="text-xs text-green-400 mt-1 flex items-center gap-1">
+              <CheckCircle className="w-3 h-3" />
+              Calibrated
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onClose={() => setContextMenu(null)}
+            onGroup={() => {
+              if (onGroup) {
+                onGroup();
+              }
+            }}
+            onUngroup={() => {
+              if (onUngroup) {
+                onUngroup();
+              }
+            }}
+            onCategorySelect={(category) => {
+              if (onMeasurementUpdate) {
+                selectedMeasurementIds.forEach(id => {
+                  onMeasurementUpdate(id, {
+                    category: category || undefined,
+                    color: category ? getCategoryColor(category) : undefined,
+                  });
+                });
+              }
+            }}
+            hasSelection={selectedMeasurementIds.size > 0}
+          />
+      )}
     </div>
   );
 }

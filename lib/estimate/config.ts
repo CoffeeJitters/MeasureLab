@@ -6,6 +6,15 @@
  */
 
 /**
+ * Estimate settings interface (user-configurable)
+ */
+export interface EstimateSettings {
+  defaultWallHeightFt: number;
+  drywallSheetSize: '4x8' | '4x10' | '4x12';
+  wastePercent: number;
+}
+
+/**
  * Estimate configuration interface
  */
 export interface EstimateConfig {
@@ -39,6 +48,31 @@ export interface EstimateConfig {
     taxPercent: number;
   };
   defaultFinishLevel: 1 | 2 | 3 | 4 | 5;
+}
+
+/**
+ * Default estimate settings
+ */
+export const defaultEstimateSettings: EstimateSettings = {
+  defaultWallHeightFt: 8, // 8 feet default wall height
+  drywallSheetSize: '4x8', // 4x8 = 32 SF
+  wastePercent: 10, // 10% waste factor
+};
+
+/**
+ * Get sheet area in SF based on sheet size
+ */
+export function getSheetAreaSF(sheetSize: '4x8' | '4x10' | '4x12'): number {
+  switch (sheetSize) {
+    case '4x8':
+      return 32;
+    case '4x10':
+      return 40;
+    case '4x12':
+      return 48;
+    default:
+      return 32;
+  }
 }
 
 /**
