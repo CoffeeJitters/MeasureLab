@@ -1,4 +1,4 @@
-import { Category } from '@/types';
+import { Category, MeasurementType } from '@/types';
 import { storage } from './storage';
 
 // Predefined categories with their colors

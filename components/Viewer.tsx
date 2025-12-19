@@ -523,11 +523,6 @@ export default function Viewer({
       return;
     }
 
-    // Prevent drawing in select mode
-    if (activeTool === 'select') {
-      return;
-    }
-
     // Prevent starting a NEW measurement if one is already active for a DIFFERENT tool
     // But allow continuing the same measurement type
     if (activeMeasurementType && activeTool !== activeMeasurementType && activeTool !== 'count' && activeTool !== 'calibrate') {
