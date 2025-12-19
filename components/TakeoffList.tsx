@@ -135,8 +135,11 @@ export default function TakeoffList({
       }
     }
 
+    // Find the measurement to check its type
+    const measurement = measurements.find(m => m.id === id);
+    
     // Parse overrideHeight for Linear measurements
-    const overrideHeight = measurement.type === 'length' && editOverrideHeight.trim() 
+    const overrideHeight = measurement?.type === 'length' && editOverrideHeight.trim() 
       ? parseFloat(editOverrideHeight) || undefined
       : undefined;
 
