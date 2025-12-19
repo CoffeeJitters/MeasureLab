@@ -1,4 +1,4 @@
-import { Measurement, UploadedFile, ScaleCalibration, Category, Group } from '@/types';
+import { Measurement, UploadedFile, ScaleCalibration, Category, Group, Tool } from '@/types';
 import { EstimateSettings } from '@/lib/estimate/config';
 
 const STORAGE_KEYS = {
@@ -118,7 +118,7 @@ export const storage = {
     }
   },
 
-  saveActiveTool: (tool: MeasurementType | 'calibrate' | null) => {
+  saveActiveTool: (tool: Tool) => {
     if (!isLocalStorageAvailable()) return;
     try {
       localStorage.setItem(STORAGE_KEYS.ACTIVE_TOOL, tool || '');
@@ -127,10 +127,10 @@ export const storage = {
     }
   },
 
-  loadActiveTool: (): MeasurementType | 'calibrate' | null => {
+  loadActiveTool: (): Tool => {
     if (!isLocalStorageAvailable()) return null;
     try {
-      return localStorage.getItem(STORAGE_KEYS.ACTIVE_TOOL) as MeasurementType | 'calibrate' | null;
+      return localStorage.getItem(STORAGE_KEYS.ACTIVE_TOOL) as Tool;
     } catch (error) {
       console.error('Failed to load active tool:', error);
       return null;

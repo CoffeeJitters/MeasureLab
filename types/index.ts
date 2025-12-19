@@ -1,5 +1,7 @@
 export type MeasurementType = 'length' | 'area' | 'count';
 export type ToolType = MeasurementType | 'calibrate' | 'select' | 'pan';
+// Unified tool type that includes null for state management
+export type Tool = ToolType | null;
 
 export type Unit = 'ft' | 'in' | 'm' | 'cm' | 'mm';
 

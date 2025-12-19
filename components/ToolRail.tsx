@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { MeasurementType } from '@/types';
+import { MeasurementType, Tool, ToolType } from '@/types';
 import { getAllCategories, TOOL_COLORS } from '@/utils/categories';
 import { 
   Ruler, 
@@ -16,8 +16,8 @@ import {
 import ToolbarButton from './ToolbarButton';
 
 interface ToolRailProps {
-  activeTool: MeasurementType | 'calibrate' | 'select' | 'pan' | null;
-  onToolSelect: (tool: MeasurementType | 'calibrate' | 'select' | 'pan' | null) => void;
+  activeTool: Tool;
+  onToolSelect: (tool: Tool) => void;
   isCalibrated: boolean;
   defaultColor: string;
   defaultCategory: string;
@@ -70,7 +70,7 @@ export default function ToolRail({
   ];
 
 
-  const handleToolSelect = (toolId: MeasurementType | 'calibrate' | 'select' | 'pan') => {
+  const handleToolSelect = (toolId: ToolType) => {
     onToolSelect(activeTool === toolId ? null : toolId);
   };
 

@@ -6,7 +6,7 @@ import Konva from 'konva';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
-import { UploadedFile, Measurement, MeasurementType, ScaleCalibration, Unit } from '@/types';
+import { UploadedFile, Measurement, MeasurementType, ScaleCalibration, Unit, Tool } from '@/types';
 import { calculateLength, calculateArea } from '@/utils/measurements';
 import { getCategoryColor, getToolColor } from '@/utils/categories';
 import { calculateImageOffset, pointerToImageCoordinates } from '@/utils/coordinates';
@@ -52,7 +52,7 @@ interface ViewerProps {
   file: UploadedFile | null;
   activePage: number;
   onPageChange: (page: number) => void;
-  activeTool: MeasurementType | 'calibrate' | 'select' | 'pan' | null;
+  activeTool: Tool;
   measurements: Measurement[];
   calibration: ScaleCalibration | null;
   onMeasurementAdd: (measurement: Measurement) => void;

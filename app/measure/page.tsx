@@ -7,7 +7,7 @@ import ToolRail from '@/components/ToolRail';
 import TakeoffList from '@/components/TakeoffList';
 import EstimatePanel from '@/components/EstimatePanel';
 import GroupNameDialog from '@/components/GroupNameDialog';
-import { UploadedFile, Measurement, MeasurementType, ScaleCalibration, Group } from '@/types';
+import { UploadedFile, Measurement, MeasurementType, ScaleCalibration, Group, Tool } from '@/types';
 import { storage } from '@/utils/storage';
 import { getToolColor } from '@/utils/categories';
 
@@ -15,7 +15,7 @@ export default function MeasurePage() {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [activePage, setActivePage] = useState(1);
-  const [activeTool, setActiveTool] = useState<MeasurementType | 'calibrate' | 'select' | null>(null);
+  const [activeTool, setActiveTool] = useState<Tool>(null);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [calibration, setCalibration] = useState<ScaleCalibration | null>(null);
