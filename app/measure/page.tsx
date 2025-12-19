@@ -178,6 +178,10 @@ export default function MeasurePage() {
     setActiveTool(null);
   }, []);
 
+  const handleToolSelect = useCallback((tool: Tool) => {
+    setActiveTool(tool);
+  }, []);
+
   const activeFile = useMemo(() => 
     files.find((f) => f.id === activeFileId) || null,
     [files, activeFileId]
@@ -215,7 +219,7 @@ export default function MeasurePage() {
         />
         <ToolRail
           activeTool={activeTool}
-          onToolSelect={setActiveTool}
+          onToolSelect={handleToolSelect}
           isCalibrated={calibration?.isCalibrated || false}
           defaultColor={defaultColor}
           defaultCategory={defaultCategory}
